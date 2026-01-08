@@ -1,6 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from supabase import create_client, Client
 import pandas as pd
 import io
@@ -12,7 +11,6 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 app = FastAPI()
 
-# ΠΡΟΣΘΗΚΗ: Επιτρέπουμε στο Lovable να επικοινωνεί με το Render
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,43 +20,46 @@ app.add_middleware(
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-class AnalysisRequest(BaseModel):
-    project_id: str
-    file_url: str
-
-@app.get("/")
-def read_root():
-    return {"status": "RetailEdge Backend is running"}
-
 @app.post("/analyze")
-async def analyze_excel(request: AnalysisRequest):
+async def analyze_excel(request: Request):
     try:
-        response = requests.get(request.file_url)
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Could not download file")
+        # Παίρνουμε τα δεδομένα όποια κι αν είναι
+        body = await request.json()
+        print(f"Received body: {body}") # Αυτό θα φανεί στα logs του Render
         
+        # Προσπάθεια λήψης των IDs με διάφορα πιθανά ονόματα
+        project_id = body.get("project_id") or body.get("projectId")
+        file_url = body.get("file_url") or body.get("fileUrl") or body.get("public_url")
+
+        if not project_id or not file_url:
+            return {"status": "error", "message": f"Missing data. Got: {body}"}
+
+        # Κατέβασμα αρχείου
+        response = requests.get(file_url)
         file_content = io.BytesIO(response.content)
-        # Διαβάζουμε το Excel - Παίρνουμε το πρώτο sheet
-        df = pd.read_excel(file_content)
         
-        # Καθαρισμός στηλών
+        # Ανάλυση με Pandas
+        df = pd.read_excel(file_content)
         df.columns = df.columns.str.strip()
         
-        # Υπολογισμός βασικών KPIs για το Dashboard
+        # Υπολογισμός βασικών KPIs
+        numeric_df = df.select_dtypes(include=['number'])
+        total_sales = float(numeric_df.iloc[:, 0].sum()) if not numeric_df.empty else 0
+        
         summary = {
             "total_rows": int(len(df)),
-            "total_sales": float(df.select_dtypes(include=['number']).sum().iloc[0]) if not df.select_dtypes(include=['number']).empty else 0,
+            "total_sales": round(total_sales, 2),
             "columns": df.columns.tolist()
         }
-        
+
         # Ενημέρωση Supabase
         supabase.table("projects").update({
             "status": "completed",
             "analysis_json": summary
-        }).eq("id", request.project_id).execute()
+        }).eq("id", project_id).execute()
         
         return {"status": "success", "data": summary}
 
     except Exception as e:
-        supabase.table("projects").update({"status": "failed"}).eq("id", request.project_id).execute()
+        print(f"Error detail: {str(e)}")
         return {"status": "error", "message": str(e)}
