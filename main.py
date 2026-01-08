@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 import pandas as pd
@@ -28,14 +28,11 @@ async def analyze_excel(request: Request):
         file_url = body.get("file_url") or body.get("fileUrl")
 
         if not project_id or not file_url:
-            return {"status": "error", "message": "Missing project_id or file_url"}
+            return {"status": "error", "message": "Missing IDs"}
 
-        # Κατέβασμα αρχείου
+        # Λήψη και ανάγνωση αρχείου
         response = requests.get(file_url)
-        file_content = io.BytesIO(response.content)
-        
-        # Ανάλυση με Pandas
-        df = pd.read_excel(file_content)
+        df = pd.read_excel(io.BytesIO(response.content))
         df.columns = df.columns.str.strip()
         
         # Υπολογισμός KPIs
@@ -48,15 +45,14 @@ async def analyze_excel(request: Request):
             "columns": df.columns.tolist()
         }
 
-        # ΠΡΟΣΟΧΗ: Ενημερώνουμε το analysis_status (όχι το status)
+        # ΔΙΟΡΘΩΣΗ: Ενημερώνουμε το analysis_status (όχι το status)
         supabase.table("projects").update({
             "analysis_status": "completed",
             "analysis_json": summary
         }).eq("id", project_id).execute()
         
-        return {"status": "success", "data": summary}
+        return {"status": "success"}
 
     except Exception as e:
-        # Σε περίπτωση λάθους, ενημερώνουμε πάλι το σωστό πεδίο
         supabase.table("projects").update({"analysis_status": "failed"}).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
