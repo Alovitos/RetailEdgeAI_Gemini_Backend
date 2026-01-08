@@ -1,5 +1,5 @@
 import pandas as pd
-import io, os, requests, re
+import io, os, requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
@@ -8,29 +8,6 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
-
-def clean_string(text):
-    return re.sub(r'[^a-z0-9]', '', str(text).lower())
-
-def identify_sales_column(df):
-    """Εντοπίζει τη στήλη τζίρου βάσει ονόματος ΚΑΙ μεγέθους τιμών"""
-    potential_cols = []
-    for col in df.columns:
-        c_clean = clean_string(col)
-        # Αν περιέχει sales/value/amount αλλά ΟΧΙ price/vat/unit
-        if any(k in c_clean for k in ['sales', 'value', 'amount']) and \
-           not any(nk in c_clean for nk in ['price', 'vat', 'unit', 'catalogue']):
-            
-            # Έλεγχος αν τα νούμερα είναι "μεγάλα" (άρα τζίρος και όχι τιμή)
-            if pd.api.types.is_numeric_dtype(df[col]):
-                avg_val = df[col].mean()
-                if avg_val > 100: # Μια τιμή μονάδας σπάνια είναι > 100 στο retail σου
-                    potential_cols.append((col, avg_val))
-    
-    if potential_cols:
-        # Επιστρέφει τη στήλη με το μεγαλύτερο μέσο όρο (τον τζίρο)
-        return sorted(potential_cols, key=lambda x: x[1], reverse=True)[0][0]
-    return None
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
@@ -41,19 +18,32 @@ async def analyze_excel(request: Request):
         response = requests.get(file_url)
         df = pd.read_excel(io.BytesIO(response.content))
         
-        # Έξυπνος εντοπισμός
-        sales_col = identify_sales_column(df)
-        # Αν αποτύχει ο έξυπνος, πάμε στη στήλη 'Value Sales' απευθείας
-        if not sales_col:
-            sales_col = next((c for c in df.columns if 'Value Sales' in c), None)
-
-        total_sales = float(df[sales_col].sum()) if sales_col else 0
+        # Καθαρισμός στηλών: Μετατροπή όλων των πιθανών αριθμών σε numeric
+        # και αφαίρεση κενών από τα ονόματα
+        df.columns = [c.strip() for c in df.columns]
         
+        sums = {}
+        for col in df.columns:
+            # Προσπαθούμε να μετατρέψουμε τη στήλη σε αριθμούς (αν δεν είναι ήδη)
+            numeric_col = pd.to_numeric(df[col], errors='coerce')
+            if numeric_col.notna().any():
+                sums[col] = numeric_col.sum()
+        
+        # Η στήλη με το μεγαλύτερο άθροισμα είναι ο Τζίρος μας
+        sales_col = max(sums, key=sums.get) if sums else None
+        total_sales = sums[sales_col] if sales_col else 0
+        
+        # Η στήλη με το δεύτερο μεγαλύτερο (συνήθως) ή που περιέχει 'Volume/Weekly' είναι οι μονάδες
+        # Εδώ για σιγουριά παίρνουμε το 'Value Sales' αν υπάρχει ως όνομα, αλλιώς το Max
+        if "Value Sales" in df.columns:
+            sales_col = "Value Sales"
+            total_sales = pd.to_numeric(df[sales_col], errors='coerce').sum()
+
         summary = {
             "total_rows": int(len(df)),
-            "total_sales": round(total_sales, 2),
+            "total_sales": float(total_sales),
             "detected_column": sales_col,
-            "all_columns": df.columns.tolist()
+            "all_sums": {str(k): float(v) for k, v in sums.items()} # Για debug
         }
 
         supabase.table("projects").update({
