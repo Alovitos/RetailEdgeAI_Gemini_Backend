@@ -6,3 +6,4 @@ supabase
 python-multipart
 pydantic
 requests
+httpx[http2]
