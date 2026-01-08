@@ -10,38 +10,27 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
 def clean_string(text):
-    """Καθαρίζει το κείμενο από κενά, underscores και το κάνει πεζά"""
     return re.sub(r'[^a-z0-9]', '', str(text).lower())
 
-def get_best_column(df_columns, keywords, negative_keywords=[]):
-    best_col = None
-    max_score = -1
-    
-    # Καθαρισμός αρνητικών λέξεων
-    clean_negatives = [clean_string(nk) for nk in negative_keywords]
-    
-    for col in df_columns:
-        score = 0
+def identify_sales_column(df):
+    """Εντοπίζει τη στήλη τζίρου βάσει ονόματος ΚΑΙ μεγέθους τιμών"""
+    potential_cols = []
+    for col in df.columns:
         c_clean = clean_string(col)
-        
-        # Αν η στήλη περιέχει ακριβώς τη φράση "valuesales" παίρνει τεράστιο προβάδισμα
-        for k in keywords:
-            k_clean = clean_string(k)
-            if k_clean in c_clean:
-                score += 20
-                # Bonus αν είναι ακριβώς ίδια
-                if k_clean == c_clean: score += 10
-        
-        # Ποινή αν περιέχει "price", "unit", "vat", "catalogue"
-        for nk in clean_negatives:
-            if nk in c_clean:
-                score -= 40  # Μεγάλη ποινή για να διώξουμε τις τιμές
-        
-        if score > max_score:
-            max_score = score
-            best_col = col
+        # Αν περιέχει sales/value/amount αλλά ΟΧΙ price/vat/unit
+        if any(k in c_clean for k in ['sales', 'value', 'amount']) and \
+           not any(nk in c_clean for nk in ['price', 'vat', 'unit', 'catalogue']):
             
-    return best_col if max_score > 0 else None
+            # Έλεγχος αν τα νούμερα είναι "μεγάλα" (άρα τζίρος και όχι τιμή)
+            if pd.api.types.is_numeric_dtype(df[col]):
+                avg_val = df[col].mean()
+                if avg_val > 100: # Μια τιμή μονάδας σπάνια είναι > 100 στο retail σου
+                    potential_cols.append((col, avg_val))
+    
+    if potential_cols:
+        # Επιστρέφει τη στήλη με το μεγαλύτερο μέσο όρο (τον τζίρο)
+        return sorted(potential_cols, key=lambda x: x[1], reverse=True)[0][0]
+    return None
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
@@ -50,36 +39,21 @@ async def analyze_excel(request: Request):
         project_id, file_url = body.get("project_id"), body.get("file_url")
 
         response = requests.get(file_url)
-        # Διαβάζουμε το Excel
         df = pd.read_excel(io.BytesIO(response.content))
         
-        # 1. Εντοπισμός Τζίρου (Value Sales) - Σκληρό φιλτράρισμα κατά των τιμών
-        sales_col = get_best_column(df.columns, 
-                                   ['valuesales', 'totalsales', 'amount', 'revenue'], 
-                                   ['price', 'unit', 'vat', 'catalogue', 'netprice'])
+        # Έξυπνος εντοπισμός
+        sales_col = identify_sales_column(df)
+        # Αν αποτύχει ο έξυπνος, πάμε στη στήλη 'Value Sales' απευθείας
+        if not sales_col:
+            sales_col = next((c for c in df.columns if 'Value Sales' in c), None)
 
-        # 2. Εντοπισμός Όγκου (Volume)
-        vol_col = get_best_column(df.columns, 
-                                 ['baseline', 'volume', 'qty', 'units', 'τεμάχια'])
-
-        # 3. Εντοπισμός Brand
-        brand_col = get_best_column(df.columns, ['brand', 'μάρκα', 'vendor'])
-
-        # Υπολογισμοί
         total_sales = float(df[sales_col].sum()) if sales_col else 0
-        total_vol = float(df[vol_col].sum()) if vol_col else 0
         
-        brand_data = {}
-        if brand_col and sales_col:
-            brand_data = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(5).to_dict()
-
         summary = {
             "total_rows": int(len(df)),
             "total_sales": round(total_sales, 2),
-            "total_volume": round(total_vol, 2),
-            "detected_sales_column": sales_col,
-            "detected_volume_column": vol_col,
-            "brand_distribution": brand_data
+            "detected_column": sales_col,
+            "all_columns": df.columns.tolist()
         }
 
         supabase.table("projects").update({
