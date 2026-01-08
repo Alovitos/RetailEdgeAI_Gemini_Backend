@@ -23,16 +23,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 @app.post("/analyze")
 async def analyze_excel(request: Request):
     try:
-        # Παίρνουμε τα δεδομένα όποια κι αν είναι
         body = await request.json()
-        print(f"Received body: {body}") # Αυτό θα φανεί στα logs του Render
-        
-        # Προσπάθεια λήψης των IDs με διάφορα πιθανά ονόματα
         project_id = body.get("project_id") or body.get("projectId")
-        file_url = body.get("file_url") or body.get("fileUrl") or body.get("public_url")
+        file_url = body.get("file_url") or body.get("fileUrl")
 
         if not project_id or not file_url:
-            return {"status": "error", "message": f"Missing data. Got: {body}"}
+            return {"status": "error", "message": "Missing project_id or file_url"}
 
         # Κατέβασμα αρχείου
         response = requests.get(file_url)
@@ -42,7 +38,7 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(file_content)
         df.columns = df.columns.str.strip()
         
-        # Υπολογισμός βασικών KPIs
+        # Υπολογισμός KPIs
         numeric_df = df.select_dtypes(include=['number'])
         total_sales = float(numeric_df.iloc[:, 0].sum()) if not numeric_df.empty else 0
         
@@ -52,14 +48,15 @@ async def analyze_excel(request: Request):
             "columns": df.columns.tolist()
         }
 
-        # Ενημέρωση Supabase
+        # ΠΡΟΣΟΧΗ: Ενημερώνουμε το analysis_status (όχι το status)
         supabase.table("projects").update({
-            "status": "completed",
+            "analysis_status": "completed",
             "analysis_json": summary
         }).eq("id", project_id).execute()
         
         return {"status": "success", "data": summary}
 
     except Exception as e:
-        print(f"Error detail: {str(e)}")
+        # Σε περίπτωση λάθους, ενημερώνουμε πάλι το σωστό πεδίο
+        supabase.table("projects").update({"analysis_status": "failed"}).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
