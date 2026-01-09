@@ -2,8 +2,6 @@ fastapi
 uvicorn
 pandas
 openpyxl
+requests
 supabase
 python-multipart
-pydantic
-requests
-httpx[http2]
