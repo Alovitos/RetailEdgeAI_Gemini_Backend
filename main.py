@@ -16,46 +16,6 @@ app.add_middleware(
 
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
-def find_smart_columns(df):
-    """Έξυπνος εντοπισμός στηλών με βάση το περιεχόμενο και το όνομα"""
-    col_map = {}
-    
-    # 1. Εντοπισμός Στήλης Πωλήσεων (Τζίρος) - Η πιο σημαντική
-    best_sales_score = -1
-    for col in df.columns:
-        score = 0
-        name = str(col).lower()
-        # Keywords
-        if any(k in name for k in ['sales', 'value', 'revenue', 'τζίρος', 'πωλήσεις']): score += 10
-        if any(k in name for k in ['price', 'unit', 'τιμή', 'λιανική']): score -= 15 # Αποκλείουμε τιμές
-        
-        # Έλεγχος δεδομένων: Ο τζίρος έχει συνήθως μεγάλα αθροίσματα
-        vals = pd.to_numeric(df[col], errors='coerce').dropna()
-        if not vals.empty:
-            if vals.max() > 500: score += 5 # Αν έχει μεγάλα νούμερα είναι τζίρος
-            if vals.mean() > 50: score += 5
-        
-        if score > best_sales_score:
-            best_sales_score = score
-            col_map['sales'] = col
-
-    # 2. Εντοπισμός Στήλης Ονόματος
-    for col in df.columns:
-        name = str(col).lower()
-        if any(k in name for k in ['sku', 'desc', 'product', 'είδος', 'περιγραφή']):
-            col_map['name'] = col
-            break
-
-    # 3. Εντοπισμός Τιμής και Κόστους
-    for col in df.columns:
-        name = str(col).lower()
-        if any(k in name for k in ['net_retail', 'sales_price', 'καθαρή']): col_map['retail'] = col
-        if any(k in name for k in ['cost', 'αγοράς', 'net_price']): col_map['cost'] = col
-        if any(k in name for k in ['category', 'κατηγορία']): col_map['cat'] = col
-        if any(k in name for k in ['brand', 'μάρκα']): col_map['brand'] = col
-
-    return col_map
-
 @app.post("/analyze")
 async def analyze_excel(request: Request):
     project_id = None
@@ -65,50 +25,79 @@ async def analyze_excel(request: Request):
         file_url = body.get("file_url")
 
         response = requests.get(file_url, timeout=60)
-        df = pd.read_excel(io.BytesIO(response.content))
+        # Χρήση openpyxl και ανάγνωση όλων των στηλών ως strings στην αρχή για ασφάλεια
+        df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Χρήση της έξυπνης συνάρτησης
-        cmap = find_smart_columns(df)
+        # --- ΑΥΣΤΗΡΟ MAPPING ΒΑΣΕΙ ΤΟΥ EXCEL ΣΟΥ (image_2b6060.png) ---
         
-        # Υπολογισμοί με ασφάλεια
-        sales = pd.to_numeric(df[cmap.get('sales')], errors='coerce').fillna(0)
-        retail = pd.to_numeric(df[cmap.get('retail')], errors='coerce').fillna(0) if cmap.get('retail') else 0
-        cost = pd.to_numeric(df[cmap.get('cost')], errors='coerce').fillna(0) if cmap.get('cost') else 0
+        # 1. Product Name -> SKU_De (αντί για SKU_ID)
+        name_col = "SKU_De" if "SKU_De" in df.columns else df.columns[0]
         
-        # GM% και ABC
-        gm = np.where(retail > 0, ((retail - cost) / retail) * 100, 0)
-        
-        temp_df = pd.DataFrame({
-            'name': df[cmap.get('name', df.columns[0])].astype(str),
-            'sales': sales,
-            'gm': gm,
-            'retail': retail,
-            'cat': df[cmap.get('cat', 'General')].astype(str) if cmap.get('cat') in df.columns else 'General',
-            'brand': df[cmap.get('brand', 'N/A')].astype(str) if cmap.get('brand') in df.columns else 'N/A'
-        }).sort_values('sales', ascending=False)
+        # 2. Value Sales -> Η στήλη "Value Sales" (ΟΧΙ η Weekly_Baseline)
+        # Ψάχνουμε για ακριβή αντιστοιχία για να αποφύγουμε το "Weekly_Baseline"
+        sales_col = "Value Sales" if "Value Sales" in df.columns else None
+        if not sales_col:
+            # Αν δεν υπάρχει το ακριβές, ψάχνουμε κάτι που περιέχει 'Value' αλλά ΟΧΙ 'Baseline'
+            for c in df.columns:
+                if "Value" in c and "Baseline" not in c:
+                    sales_col = c
+                    break
 
-        total_sales = float(temp_df['sales'].sum())
+        # 3. Net Price -> Η στήλη "Net_Price" (Καθαρή τιμή αγοράς/κόστους)
+        net_cost_col = "Net_Price" if "Net_Price" in df.columns else None
+        
+        # 4. Sales Price -> "Sales_Without_V" (Η καθαρή λιανική που φέρνει το κέρδος)
+        retail_col = "Sales_Without_V" if "Sales_Without_V" in df.columns else "Sales_Price_With_V"
+
+        # 5. Λοιπά
+        cat_col = "Segment" if "Segment" in df.columns else "Category"
+        brand_col = "Brand"
+
+        # --- ΕΠΕΞΕΡΓΑΣΙΑ ΔΕΔΟΜΕΝΩΝ ---
+        df['sales_val'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
+        df['net_ret'] = pd.to_numeric(df[retail_col], errors='coerce').fillna(0)
+        df['net_cost'] = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0)
+        
+        # Υπολογισμός Margin % (GM%)
+        df['gm_percent'] = 0
+        mask = df['net_ret'] > 0
+        df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'net_ret'] - df.loc[mask, 'net_cost']) / df.loc[mask, 'net_ret']) * 100
+        df['gm_percent'] = df['gm_percent'].replace([np.inf, -np.inf], 0).fillna(0)
+
+        # ABC Analysis βασισμένη στο ΠΡΑΓΜΑΤΙΚΟ Value Sales
+        df = df.sort_values('sales_val', ascending=False)
+        total_sales = float(df['sales_val'].sum())
+        
         if total_sales > 0:
-            temp_df['cum'] = (temp_df['sales'].cumsum() / total_sales) * 100
-            temp_df['abc'] = pd.cut(temp_df['cum'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
+            df['cum_perc'] = (df['sales_val'].cumsum() / total_sales) * 100
+            df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
         else:
-            temp_df['abc'] = 'C'
+            df['abc_class'] = 'C'
 
         raw_data = []
-        for _, row in temp_df.iterrows():
+        for _, row in df.iterrows():
             raw_data.append({
-                "product_name": row['name'],
-                "category": row['cat'],
-                "brand": row['brand'],
-                "sales": round(float(row['sales']), 2),
-                "clean_sales_price": round(float(row['retail']), 2),
-                "gm_percent": round(float(row['gm']), 2),
-                "abc_class": str(row['abc'])
+                "product_name": str(row[name_col]),
+                "category": str(row[cat_col]) if cat_col in df.columns else "General",
+                "brand": str(row[brand_col]) if brand_col in df.columns else "N/A",
+                "sales": round(float(row['sales_val']), 2),
+                "clean_sales_price": round(float(row['net_ret']), 2),
+                "gm_percent": round(float(row['gm_percent']), 2),
+                "abc_class": str(row['abc_class'])
             })
 
-        result = {"total_sales": round(total_sales, 2), "raw_data": raw_data, "status": "success"}
-        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
+        result = {
+            "total_sales": round(total_sales, 2),
+            "raw_data": raw_data,
+            "status": "success"
+        }
+
+        supabase.table("projects").update({
+            "analysis_status": "completed", 
+            "analysis_json": result
+        }).eq("id", project_id).execute()
+
         return {"status": "success"}
 
     except Exception as e:
