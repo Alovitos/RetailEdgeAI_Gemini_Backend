@@ -1,6 +1,5 @@
 import pandas as pd
-import io, os, requests
-import numpy as np
+import io, os, requests, np
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
@@ -24,48 +23,37 @@ async def analyze_excel(request: Request):
         project_id = body.get("project_id")
         file_url = body.get("file_url")
 
+        # Λήψη αρχείου
         response = requests.get(file_url, timeout=60)
-        # Χρήση openpyxl και ανάγνωση όλων των στηλών ως strings στην αρχή για ασφάλεια
-        df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
-
-        # --- ΑΥΣΤΗΡΟ MAPPING ΒΑΣΕΙ ΤΟΥ EXCEL ΣΟΥ (image_2b6060.png) ---
+        file_data = io.BytesIO(response.content)
         
-        # 1. Product Name -> SKU_De (αντί για SKU_ID)
-        name_col = "SKU_De" if "SKU_De" in df.columns else df.columns[0]
+        # ΑΝΑΓΝΩΣΗ ΜΕ ΠΛΗΡΗ ΠΑΡΑΚΑΜΨΗ ENCODING ERRORS
+        df = pd.read_excel(file_data, engine='openpyxl')
         
-        # 2. Value Sales -> Η στήλη "Value Sales" (ΟΧΙ η Weekly_Baseline)
-        # Ψάχνουμε για ακριβή αντιστοιχία για να αποφύγουμε το "Weekly_Baseline"
-        sales_col = "Value Sales" if "Value Sales" in df.columns else None
-        if not sales_col:
-            # Αν δεν υπάρχει το ακριβές, ψάχνουμε κάτι που περιέχει 'Value' αλλά ΟΧΙ 'Baseline'
-            for c in df.columns:
-                if "Value" in c and "Baseline" not in c:
-                    sales_col = c
-                    break
+        # Καθαρισμός ονομάτων στηλών από κρυφούς χαρακτήρες
+        df.columns = [str(c).strip().encode('ascii', 'ignore').decode('ascii') for c in df.columns]
 
-        # 3. Net Price -> Η στήλη "Net_Price" (Καθαρή τιμή αγοράς/κόστους)
-        net_cost_col = "Net_Price" if "Net_Price" in df.columns else None
-        
-        # 4. Sales Price -> "Sales_Without_V" (Η καθαρή λιανική που φέρνει το κέρδος)
-        retail_col = "Sales_Without_V" if "Sales_Without_V" in df.columns else "Sales_Price_With_V"
-
-        # 5. Λοιπά
-        cat_col = "Segment" if "Segment" in df.columns else "Category"
+        # --- ΑΥΣΤΗΡΟ EXACT MATCHING (image_2b6060.png) ---
+        # Χρησιμοποιούμε τις ακριβείς ονομασίες που βλέπουμε στο Excel σου
+        name_col = "SKU_De"
+        sales_col = "Value Sales"
+        net_cost_col = "Net_Price"
+        retail_col = "Sales_Without_V"
         brand_col = "Brand"
+        cat_col = "Segment"
 
-        # --- ΕΠΕΞΕΡΓΑΣΙΑ ΔΕΔΟΜΕΝΩΝ ---
+        # Μετατροπή σε νούμερα με αφαίρεση τυχόν κειμένου
         df['sales_val'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
         df['net_ret'] = pd.to_numeric(df[retail_col], errors='coerce').fillna(0)
         df['net_cost'] = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0)
         
-        # Υπολογισμός Margin % (GM%)
+        # Υπολογισμός Margin
         df['gm_percent'] = 0
         mask = df['net_ret'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'net_ret'] - df.loc[mask, 'net_cost']) / df.loc[mask, 'net_ret']) * 100
         df['gm_percent'] = df['gm_percent'].replace([np.inf, -np.inf], 0).fillna(0)
 
-        # ABC Analysis βασισμένη στο ΠΡΑΓΜΑΤΙΚΟ Value Sales
+        # Κατάταξη ABC
         df = df.sort_values('sales_val', ascending=False)
         total_sales = float(df['sales_val'].sum())
         
@@ -77,10 +65,12 @@ async def analyze_excel(request: Request):
 
         raw_data = []
         for _, row in df.iterrows():
+            # Καθαρίζουμε και το κείμενο του προϊόντος από περίεργα bytes
+            p_name = str(row[name_col]).encode('ascii', 'ignore').decode('ascii')
             raw_data.append({
-                "product_name": str(row[name_col]),
-                "category": str(row[cat_col]) if cat_col in df.columns else "General",
-                "brand": str(row[brand_col]) if brand_col in df.columns else "N/A",
+                "product_name": p_name,
+                "category": str(row[cat_col]),
+                "brand": str(row[brand_col]),
                 "sales": round(float(row['sales_val']), 2),
                 "clean_sales_price": round(float(row['net_ret']), 2),
                 "gm_percent": round(float(row['gm_percent']), 2),
@@ -93,6 +83,7 @@ async def analyze_excel(request: Request):
             "status": "success"
         }
 
+        # Ενημέρωση Supabase
         supabase.table("projects").update({
             "analysis_status": "completed", 
             "analysis_json": result
@@ -102,5 +93,8 @@ async def analyze_excel(request: Request):
 
     except Exception as e:
         if project_id:
-            supabase.table("projects").update({"analysis_status": "failed"}).eq("id", project_id).execute()
+            supabase.table("projects").update({
+                "analysis_status": "failed",
+                "analysis_json": {"error": str(e)}
+            }).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
