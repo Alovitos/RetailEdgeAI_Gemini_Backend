@@ -27,30 +27,37 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. Mapping
-        sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος"])
-        price_col = get_best_column(df, ["Price", "Τιμή", "Retail Price", "Unit Price"])
-        cost_col = get_best_column(df, ["Cost", "Κόστος", "Purchase Price"])
+        # 1. Έξυπνο Mapping
+        sales_val_col = get_best_column(df, ["Total Sales", "Τζίρος", "Value Sales"])
+        price_with_vat_col = get_best_column(df, ["Sales Price", "Τιμή Λιανικής", "Retail Price"])
+        vat_col = get_best_column(df, ["VAT", "ΦΠΑ", "Tax"])
+        cost_net_col = get_best_column(df, ["Net Price", "Cost Price", "Τιμή Αγοράς"])
+        
         cat_col = get_best_column(df, ["Category", "Κατηγορία"])
         brand_col = get_best_column(df, ["Brand", "Μάρκα"])
         desc_col = get_best_column(df, ["Description", "Περιγραφή", "Name"])
         code_col = get_best_column(df, ["SKU", "Code", "Κωδικός"])
 
-        # 2. Data Processing
-        df['sales'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        df['unit_price'] = pd.to_numeric(df[price_col], errors='coerce').fillna(0)
-        # Υπολογισμός Κόστους (αν λείπει, βάζουμε 70% της τιμής)
-        df['unit_cost'] = pd.to_numeric(df[cost_col], errors='coerce').fillna(df['unit_price'] * 0.7) if cost_col else df['unit_price'] * 0.7
+        # 2. Μετατροπή σε αριθμούς
+        raw_price = pd.to_numeric(df[price_with_vat_col], errors='coerce').fillna(0)
+        vat_rate = pd.to_numeric(df[vat_col], errors='coerce').fillna(0)
+        # Αν το ΦΠΑ είναι σε μορφή π.χ. 24, το κάνουμε 0.24. Αν είναι 0.24, το αφήνουμε.
+        vat_factor = np.where(vat_rate >= 1, vat_rate / 100, vat_rate)
         
-        # Margin Calculations
-        df['gm_value'] = df['sales'] - (df['unit_cost'] * (df['sales'] / df['unit_price']).replace([np.inf, -np.inf], 0))
-        df['gm_percent'] = (df['gm_value'] / df['sales']).replace([np.inf, -np.inf, np.nan], 0) * 100
+        # 3. Δυναμική Αποφορολόγηση ανά Row
+        df['clean_sales_price'] = raw_price / (1 + vat_factor)
+        
+        # 4. Υπολογισμός GM%
+        purchase_net = pd.to_numeric(df[cost_net_col], errors='coerce').fillna(0)
+        df['gm_percent'] = ((df['clean_sales_price'] - purchase_net) / df['clean_sales_price']).replace([np.inf, -np.inf, np.nan], 0) * 100
 
+        # 5. Λοιπά δεδομένα
+        df['sales'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
         df['category'] = df[cat_col].astype(str) if cat_col else "General"
         df['brand'] = df[brand_col].astype(str) if brand_col else "N/A"
         df['product_name'] = (df[code_col].astype(str) + " - " + df[desc_col].astype(str)) if code_col and desc_col else df[desc_col]
 
-        # 3. Contextual ABC Analysis
+        # 6. ABC Analysis (Contextual)
         def calculate_category_abc(group):
             group = group.sort_values('sales', ascending=False)
             total = group['sales'].sum()
@@ -63,10 +70,9 @@ async def analyze_excel(request: Request):
 
         df = df.groupby('category', group_keys=False).apply(calculate_category_abc)
 
-        # 4. JSON Response (Standardized Keys)
         result = {
             "total_sales": round(float(df['sales'].sum()), 2),
-            "raw_data": df[['brand', 'category', 'product_name', 'sales', 'unit_price', 'abc_class', 'gm_percent']].to_dict(orient='records'),
+            "raw_data": df[['brand', 'category', 'product_name', 'sales', 'clean_sales_price', 'abc_class', 'gm_percent']].to_dict(orient='records'),
             "status": "success"
         }
 
