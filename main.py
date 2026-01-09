@@ -27,37 +27,45 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. Έξυπνο Mapping
+        # 1. Mapping Στηλών
         sales_val_col = get_best_column(df, ["Total Sales", "Τζίρος", "Value Sales"])
         price_with_vat_col = get_best_column(df, ["Sales Price", "Τιμή Λιανικής", "Retail Price"])
         vat_col = get_best_column(df, ["VAT", "ΦΠΑ", "Tax"])
-        cost_net_col = get_best_column(df, ["Net Price", "Cost Price", "Τιμή Αγοράς"])
+        cost_net_col = get_best_column(df, ["Net Price", "Cost Price", "Τιμή Αγοράς", "Net Cost"])
         
         cat_col = get_best_column(df, ["Category", "Κατηγορία"])
         brand_col = get_best_column(df, ["Brand", "Μάρκα"])
         desc_col = get_best_column(df, ["Description", "Περιγραφή", "Name"])
         code_col = get_best_column(df, ["SKU", "Code", "Κωδικός"])
 
-        # 2. Μετατροπή σε αριθμούς
+        # 2. Row-by-Row Calculations
+        # Μετατροπή σε αριθμούς και καθαρισμός
         raw_price = pd.to_numeric(df[price_with_vat_col], errors='coerce').fillna(0)
-        vat_rate = pd.to_numeric(df[vat_col], errors='coerce').fillna(0)
-        # Αν το ΦΠΑ είναι σε μορφή π.χ. 24, το κάνουμε 0.24. Αν είναι 0.24, το αφήνουμε.
-        vat_factor = np.where(vat_rate >= 1, vat_rate / 100, vat_rate)
-        
-        # 3. Δυναμική Αποφορολόγηση ανά Row
-        df['clean_sales_price'] = raw_price / (1 + vat_factor)
-        
-        # 4. Υπολογισμός GM%
+        vat_val = pd.to_numeric(df[vat_col], errors='coerce').fillna(0)
         purchase_net = pd.to_numeric(df[cost_net_col], errors='coerce').fillna(0)
+        
+        # Υπολογισμός ΦΠΑ factor (π.χ. 24 -> 1.24)
+        vat_factor = np.where(vat_val >= 1, 1 + (vat_val / 100), 1 + vat_val)
+        
+        # Αποφορολόγηση: Net Retail = Gross Price / (1 + VAT%)
+        df['clean_sales_price'] = raw_price / vat_factor
+        
+        # Υπολογισμός GM%: (Net Retail - Net Cost) / Net Retail
+        # Χρησιμοποιούμε .replace για να αποφύγουμε το διαίρεση με το μηδέν (NaN/Inf)
         df['gm_percent'] = ((df['clean_sales_price'] - purchase_net) / df['clean_sales_price']).replace([np.inf, -np.inf, np.nan], 0) * 100
+        
+        # Συνολικό Κέρδος σε Ευρώ (προαιρετικό αλλά χρήσιμο)
+        # Υποθέτουμε Sales / Gross Price = Units Sold
+        units = (pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0) / raw_price).replace([np.inf, -np.inf, np.nan], 0)
+        df['gm_value_total'] = (df['clean_sales_price'] - purchase_net) * units
 
-        # 5. Λοιπά δεδομένα
+        # 3. Metadata
         df['sales'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
-        df['category'] = df[cat_col].astype(str) if cat_col else "General"
-        df['brand'] = df[brand_col].astype(str) if brand_col else "N/A"
+        df['category'] = df[cat_col].astype(str).str.strip() if cat_col else "General"
+        df['brand'] = df[brand_col].astype(str).str.strip() if brand_col else "N/A"
         df['product_name'] = (df[code_col].astype(str) + " - " + df[desc_col].astype(str)) if code_col and desc_col else df[desc_col]
 
-        # 6. ABC Analysis (Contextual)
+        # 4. ABC Analysis Per Category
         def calculate_category_abc(group):
             group = group.sort_values('sales', ascending=False)
             total = group['sales'].sum()
@@ -70,6 +78,7 @@ async def analyze_excel(request: Request):
 
         df = df.groupby('category', group_keys=False).apply(calculate_category_abc)
 
+        # 5. Τελικό JSON (Καθαρά κλειδιά)
         result = {
             "total_sales": round(float(df['sales'].sum()), 2),
             "raw_data": df[['brand', 'category', 'product_name', 'sales', 'clean_sales_price', 'abc_class', 'gm_percent']].to_dict(orient='records'),
@@ -79,4 +88,6 @@ async def analyze_excel(request: Request):
         supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
         return {"status": "success"}
     except Exception as e:
+        # Αν αποτύχει, ενημέρωσε τη βάση με το σφάλμα για να το δούμε στο UI
+        supabase.table("projects").update({"analysis_status": "failed", "error_message": str(e)}).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
