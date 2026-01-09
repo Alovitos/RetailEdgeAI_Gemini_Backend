@@ -29,37 +29,29 @@ async def analyze_excel(request: Request):
         # 1. Mapping Στηλών
         sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος", "Value"])
         brand_col = get_best_column(df, ["Brand", "Μάρκα", "Επωνυμία", "Manufacturer"])
-        prod_col = get_best_column(df, ["Description", "Περιγραφή", "Product", "Προϊόν", "Name"])
+        prod_col = get_best_column(df, ["Description", "Περιγραφή", "Product", "Προϊόν", "Name", "SKU"])
         cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group", "Ομάδα"])
 
-        # 2. Υπολογισμοί
+        # 2. Προετοιμασία Δεδομένων
         df[sales_col] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        total_sales = float(df[sales_col].sum())
+        
+        # 3. Εξαγωγή Φίλτρων (Unique Values)
+        filters = {
+            "brands": sorted(df[brand_col].dropna().unique().tolist()) if brand_col else [],
+            "categories": sorted(df[cat_col].dropna().unique().tolist()) if cat_col else [],
+            "products": sorted(df[prod_col].dropna().unique().tolist()) if prod_col else []
+        }
 
-        # Top 10 Products
-        top_products = []
-        if prod_col and sales_col:
-            prod_summary = df.groupby(prod_col)[sales_col].sum().sort_values(ascending=False).head(10)
-            top_products = [{"name": str(k), "sales": float(v)} for k, v in prod_summary.items()]
-
-        # Top Brands
-        top_brands = []
-        if brand_col and sales_col:
-            brand_summary = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(5)
-            top_brands = [{"name": str(k), "value": float(v)} for k, v in brand_summary.items()]
-
-        # Category Analysis
-        categories = []
-        if cat_col and sales_col:
-            cat_summary = df.groupby(cat_col)[sales_col].sum().sort_values(ascending=False)
-            categories = [{"name": str(k), "value": float(v)} for k, v in cat_summary.items()]
+        # 4. Αρχικά Analytics (Full View)
+        brand_summary = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(10) if brand_col else pd.Series()
+        prod_summary = df.groupby(prod_col)[sales_col].sum().sort_values(ascending=False).head(10) if prod_col else pd.Series()
 
         result = {
-            "total_sales": round(total_sales, 2),
-            "total_items": len(df),
-            "top_products": top_products,
-            "top_brands": top_brands,
-            "categories": categories,
+            "total_sales": round(float(df[sales_col].sum()), 2),
+            "filters": filters,
+            "top_brands": [{"name": str(k), "value": float(v)} for k, v in brand_summary.items()],
+            "top_products": [{"name": str(k), "sales": float(v)} for k, v in prod_summary.items()],
+            "raw_data": df.to_dict(orient='records'), # Στέλνουμε τα δεδομένα για να φιλτράρει το Lovable τοπικά
             "status": "success"
         }
 
