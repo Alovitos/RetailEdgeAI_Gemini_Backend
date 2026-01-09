@@ -5,4 +5,4 @@ openpyxl
 requests
 supabase
 python-multipart
-httpx
+httpx[http2]
