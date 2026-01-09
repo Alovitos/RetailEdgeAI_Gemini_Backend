@@ -29,64 +29,44 @@ async def analyze_excel(request: Request):
 
         # 1. Mapping
         sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος", "Value"])
-        brand_col = get_best_column(df, ["Brand", "Μάρκα", "Επωνυμία", "Manufacturer"])
-        cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group", "Ομάδα", "Department"])
-        code_col = get_best_column(df, ["SKU", "Code", "Κωδικός", "Item No"])
-        desc_col = get_best_column(df, ["Description", "Περιγραφή", "Name", "Προϊόν"])
-        price_col = get_best_column(df, ["Price", "Τιμή", "Rate"])
-
-        # 2. Προετοιμασία Δεδομένων
+        price_col = get_best_column(df, ["Price", "Τιμή", "Rate", "Unit Price"])
+        
         df['sales'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        df['brand'] = df[brand_col].astype(str).str.strip() if brand_col else "N/A"
-        df['category'] = df[cat_col].astype(str).str.strip() if cat_col else "N/A"
         df['unit_price'] = pd.to_numeric(df[price_col], errors='coerce').fillna(0) if price_col else 0
+
+        # 2. ABC Analysis (Σωστός υπολογισμός)
+        df = df.sort_values(by='sales', ascending=False)
+        df['cum_sales'] = df['sales'].cumsum()
+        total_sum = df['sales'].sum()
+        df['cum_percent'] = (df['cum_sales'] / total_sum) * 100
         
-        if code_col and desc_col:
-            df['product'] = df[code_col].astype(str) + " - " + df[desc_col].astype(str)
-        else:
-            df['product'] = df[desc_col] if desc_col else "Unknown"
-
-        # 3. ABC Analysis Logic
-        df_sorted = df.sort_values(by='sales', ascending=False)
-        df_sorted['cum_sales'] = df_sorted['sales'].cumsum()
-        total_sum = df_sorted['sales'].sum()
-        df_sorted['cum_percent'] = 100 * df_sorted['cum_sales'] / total_sum
+        df['abc_class'] = pd.cut(df['cum_percent'], bins=[0, 80, 95, 100.01], labels=['A', 'B', 'C'])
         
-        def abc_classify(percent):
-            if percent <= 80: return 'A'
-            elif percent <= 95: return 'B'
-            else: return 'C'
-            
-        df['abc_class'] = df_sorted['cum_percent'].apply(abc_classify)
+        abc_summary = df['abc_class'].value_counts().to_dict()
+        abc_stats = [
+            {"class": "A", "count": int(abc_summary.get('A', 0)), "share": 80},
+            {"class": "B", "count": int(abc_summary.get('B', 0)), "share": 15},
+            {"class": "C", "count": int(abc_summary.get('C', 0)), "share": 5}
+        ]
 
-        # 4. Price Segments
-        price_bins = [0, 10, 50, 100, 500, 10000]
-        price_labels = ['0-10€', '10-50€', '50-100€', '100-500€', '500€+']
-        df['price_segment'] = pd.cut(df['unit_price'], bins=price_bins, labels=price_labels, include_lowest=True)
+        # 3. Price Range Analysis (Σωστά Bins)
+        bins = [0, 5, 20, 50, 100, 10000]
+        labels = ['0-5€', '5-20€', '20-50€', '50-100€', '100€+']
+        df['price_range'] = pd.cut(df['unit_price'], bins=bins, labels=labels)
+        price_summary = df.groupby('price_range')['sales'].sum().reset_index()
+        price_analysis = [{"segment": row['price_range'], "value": float(row['sales'])} for index, row in price_summary.iterrows()]
 
-        # 5. Στατιστικά για το JSON
-        abc_counts = df['abc_class'].value_counts().to_dict()
-        price_segments = df.groupby('price_segment')['sales'].sum().to_dict()
-
+        # 4. Final Result
         result = {
             "total_sales": round(float(total_sum), 2),
-            "abc_stats": [{"class": k, "count": int(v)} for k, v in abc_counts.items()],
-            "price_analysis": [{"segment": str(k), "value": float(v)} for k, v in price_segments.items()],
-            "filters": {
-                "brands": sorted(df['brand'].unique().tolist()),
-                "categories": sorted(df['category'].unique().tolist()),
-                "abc_class": ['A', 'B', 'C']
-            },
-            "raw_data": df[['brand', 'category', 'product', 'sales', 'abc_class', 'price_segment', 'unit_price']].to_dict(orient='records'),
+            "total_items": len(df),
+            "abc_stats": abc_stats,
+            "price_analysis": price_analysis,
+            "raw_data": df.to_dict(orient='records'),
             "status": "success"
         }
 
-        supabase.table("projects").update({
-            "analysis_status": "completed",
-            "analysis_json": result
-        }).eq("id", project_id).execute()
-
+        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
         return {"status": "success"}
     except Exception as e:
-        supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
-        return {"status": "error"}
+        return {"status": "error", "message": str(e)}
