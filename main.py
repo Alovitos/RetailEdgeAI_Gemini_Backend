@@ -7,13 +7,11 @@ from supabase import create_client, Client
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(url, key) if url and key else None
+supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
-def find_column(df_cols, keywords):
-    """Βρίσκει την καλύτερη στήλη με βάση λέξεις-κλειδιά"""
-    for col in df_cols:
+def get_best_column(df, keywords):
+    """Βρίσκει την πιο ταιριαστή στήλη βάσει λέξεων-κλειδιών"""
+    for col in df.columns:
         if any(key.lower() in str(col).lower() for key in keywords):
             return col
     return None
@@ -25,55 +23,44 @@ async def analyze_excel(request: Request):
         project_id = body.get("project_id")
         file_url = body.get("file_url")
 
+        # Λήψη και ανάγνωση
         response = requests.get(file_url, timeout=30)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Mapping Στηλών
-        brand_col = find_column(df.columns, ["Brand", "Μάρκα"])
-        mfr_col = find_column(df.columns, ["Manufacturer", "Κατασκευαστής"])
-        sales_col = find_column(df.columns, ["Sales", "Πωλήσεις", "Value"])
-        margin_col = find_column(df.columns, ["Margin", "Περιθώριο", "Profit"])
-        price_col = find_column(df.columns, ["Price", "Τιμή"])
+        # 1. Εντοπισμός στηλών με προτεραιότητα
+        # Ψάχνουμε για "Total Sales" ή "Value" για να αποφύγουμε την απλή τιμή μονάδας
+        sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος"])
+        if not sales_col: # Αν δεν βρει τα παραπάνω, ψάχνει γενικά για πωλήσεις
+            sales_col = get_best_column(df, ["Sales", "Πωλήσεις", "Value"])
+        
+        brand_col = get_best_column(df, ["Brand", "Μάρκα"])
+        qty_col = get_best_column(df, ["Qty", "Quantity", "Ποσότητα", "Units"])
 
-        # Μετατροπή σε νούμερα
-        if sales_col: df[sales_col] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        if margin_col: df[margin_col] = pd.to_numeric(df[margin_col], errors='coerce').fillna(0)
-
-        # Ανάλυση Brands για το γράφημα
+        # 2. Υπολογισμοί
+        total_sales = pd.to_numeric(df[sales_col], errors='coerce').sum() if sales_col else 0
+        total_qty = pd.to_numeric(df[qty_col], errors='coerce').sum() if qty_col else len(df)
+        
+        # 3. Top 5 Brands για το γράφημα
         top_brands = []
         if brand_col and sales_col:
-            brand_data = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(5)
-            top_brands = [{"name": str(k), "value": float(v)} for k, v in brand_data.items()]
-
-        # Υπολογισμός KPI
-        total_sales = float(df[sales_col].sum()) if sales_col else 0
-        avg_margin = float(df[margin_col].mean()) if margin_col else 0
+            brand_summary = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(5)
+            top_brands = [{"name": str(k), "value": float(v)} for k, v in brand_summary.items()]
 
         result = {
-            "total_sales": round(total_sales, 2),
-            "total_volume": len(df),
-            "avg_margin": round(avg_margin, 2),
+            "total_sales": round(float(total_sales), 2),
+            "total_volume": int(total_qty),
             "top_brands": top_brands,
-            "detected_fields": {
-                "brand": brand_col,
-                "manufacturer": mfr_col,
-                "sales": sales_col
-            }
+            "detected_columns": {"sales": sales_col, "brand": brand_col, "qty": qty_col}
         }
 
-        if supabase:
-            supabase.table("projects").update({
-                "analysis_status": "completed",
-                "analysis_json": result
-            }).eq("id", project_id).execute()
+        # Ενημέρωση Supabase
+        supabase.table("projects").update({
+            "analysis_status": "completed",
+            "analysis_json": result
+        }).eq("id", project_id).execute()
 
         return {"status": "success"}
-
     except Exception as e:
-        if supabase:
-            supabase.table("projects").update({
-                "analysis_status": "failed",
-                "analysis_json": {"error": str(e)}
-            }).eq("id", project_id).execute()
-        return {"status": "error", "message": str(e)}
+        supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
+        return {"status": "error"}
