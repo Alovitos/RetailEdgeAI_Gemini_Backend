@@ -16,6 +16,7 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+# Σύνδεση με Supabase
 supabase: Client = create_client(
     os.environ.get("SUPABASE_URL"),
     os.environ.get("SUPABASE_KEY")
@@ -35,63 +36,68 @@ async def analyze_excel(request: Request):
         # Καθαρισμός κενών στα ονόματα των στηλών
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- ΕΞΥΠΝΟ MAPPING ΜΕ FALLBACKS ---
-        # Product Name
-        name_col = next((c for c in ["SKU_De", "SKU_Description", "Description"] if c in df.columns), df.columns[0])
+        # --- ΣΤΑΘΕΡΟ MAPPING ΠΟΥ ΔΟΥΛΕΥΕΙ ---
+        name_col = "SKU_De"       # Περιγραφή Προϊόντος
+        sales_val_col = "Value Sales"  # Συνολικός Τζίρος (π.χ. 237.000€)
         
-        # Sales
-        sales_col = next((c for c in ["Value Sales", "Total Sales", "Sales"] if c in df.columns), None)
-        
-        # Net Price (Κόστος)
-        net_cost_col = next((c for c in ["Net_Price", "Cost", "Net Price"] if c in df.columns), None)
-        
-        # Sales Price (Λιανική)
-        retail_col = next((c for c in ["Sales_Without_V", "Sales_Price_With_V", "Retail Price"] if c in df.columns), None)
-
-        # Brand & Category
-        brand_col = next((c for c in ["Brand", "Μάρκα"] if c in df.columns), None)
-        cat_col = next((c for c in ["Segment", "Category", "Κατηγορία"] if c in df.columns), None)
+        # --- MAPPING ΤΙΜΩΝ ΒΑΣΕΙ ΟΔΗΓΙΩΝ ΣΟΥ ---
+        retail_with_vat = "Sales_Price_With_VAT"  # Τιμή πώλησης ΜΕ ΦΠΑ (για εμφάνιση)
+        retail_no_vat = "Sales_Without_VAT"     # Τιμή πώλησης ΧΩΡΙΣ ΦΠΑ (για Margin)
+        cost_net = "Net_Price"                  # Τιμή αγοράς / Κόστος (Net Price)
 
         # Μετατροπή σε νούμερα
-        df['sales_val'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0) if sales_col else 0
-        df['net_ret'] = pd.to_numeric(df[retail_col], errors='coerce').fillna(0) if retail_col else 0
-        df['net_cost'] = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0) if net_cost_col else 0
+        df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
+        df['price_vat'] = pd.to_numeric(df[retail_with_vat], errors='coerce').fillna(0)
+        df['price_no_vat'] = pd.to_numeric(df[retail_no_vat], errors='coerce').fillna(0)
+        df['cost_net'] = pd.to_numeric(df[cost_net], errors='coerce').fillna(0)
         
-        # GM% Calculation
-        df['gm_percent'] = 0
-        mask = df['net_ret'] > 0
-        df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'net_ret'] - df.loc[mask, 'net_cost']) / df.loc[mask, 'net_ret']) * 100
-
-        # ABC Analysis
-        df = df.sort_values('sales_val', ascending=False)
-        total_sales = float(df['sales_val'].sum())
+        # Υπολογισμός Margin % (GM%) βασισμένος στις Net τιμές
+        # Formula: ((Retail_No_Vat - Cost_Net) / Retail_No_Vat) * 100
+        df['gm_percent'] = 0.0
+        mask = df['price_no_vat'] > 0
+        df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'price_no_vat'] - df.loc[mask, 'cost_net']) / df.loc[mask, 'price_no_vat']) * 100
         
-        if total_sales > 0:
-            df['cum_perc'] = (df['sales_val'].cumsum() / total_sales) * 100
+        # ABC Analysis (Σταθερή λογική)
+        df = df.sort_values('sales_total', ascending=False)
+        total_sales_sum = float(df['sales_total'].sum())
+        
+        if total_sales_sum > 0:
+            df['cum_perc'] = (df['sales_total'].cumsum() / total_sales_sum) * 100
             df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
         else:
             df['abc_class'] = 'C'
 
         raw_data = []
         for _, row in df.iterrows():
-            # Αφαίρεση ειδικών χαρακτήρων από το όνομα για το JSON
-            clean_name = str(row[name_col]).encode('ascii', 'ignore').decode('ascii')
             raw_data.append({
-                "product_name": clean_name,
-                "category": str(row[cat_col]) if cat_col else "General",
-                "brand": str(row[brand_col]) if brand_col else "N/A",
-                "sales": round(float(row['sales_val']), 2),
-                "clean_sales_price": round(float(row['net_ret']), 2),
-                "gm_percent": round(float(row['gm_percent']), 2),
+                "product_name": str(row[name_col]),
+                "category": str(row["Segment"]) if "Segment" in df.columns else "General",
+                "brand": str(row["Brand"]) if "Brand" in df.columns else "N/A",
+                "sales": round(float(row['sales_total']), 2),
+                "clean_sales_price": round(float(row['price_vat']), 2), # Εμφάνιση Τιμής ΜΕ ΦΠΑ
+                "net_price": round(float(row['cost_net']), 2),           # Εμφάνιση Net Price (Κόστος)
+                "gm_percent": round(float(row['gm_percent']), 1),        # Margin υπολογισμένο ΧΩΡΙΣ ΦΠΑ
                 "abc_class": str(row['abc_class'])
             })
 
-        result = {"total_sales": round(total_sales, 2), "raw_data": raw_data, "status": "success"}
+        result = {
+            "total_sales": round(total_sales_sum, 2), 
+            "raw_data": raw_data, 
+            "status": "success"
+        }
 
-        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
+        # Ενημέρωση Supabase
+        supabase.table("projects").update({
+            "analysis_status": "completed", 
+            "analysis_json": result
+        }).eq("id", project_id).execute()
+
         return {"status": "success"}
 
     except Exception as e:
         if project_id:
-            supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
+            supabase.table("projects").update({
+                "analysis_status": "failed",
+                "analysis_json": {"error": str(e)}
+            }).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
