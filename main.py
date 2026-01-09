@@ -11,39 +11,41 @@ supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get(
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
+    project_id = None
     try:
         body = await request.json()
         project_id = body.get("project_id")
         file_url = body.get("file_url")
+        
+        print(f"Starting analysis for project: {project_id}")
 
-        # 1. Κατέβασμα αρχείου με headers για αποφυγή μπλοκαρίσματος
-        response = requests.get(file_url, allow_redirects=True)
+        # 1. Λήψη αρχείου με timeout και redirects
+        response = requests.get(file_url, allow_redirects=True, timeout=30)
         if response.status_code != 200:
-            raise Exception(f"Failed to download file: Status {response.status_code}")
-            
+            raise Exception(f"Download failed: {response.status_code}")
+
+        # 2. Φόρτωση στη μνήμη
         file_content = io.BytesIO(response.content)
         
-        # 2. Ανάγνωση Excel - Δοκιμή με engine openpyxl
+        # 3. Δοκιμή ανάγνωσης με πολλαπλά engines
         try:
             df = pd.read_excel(file_content, engine='openpyxl')
-        except Exception:
-            # Αν αποτύχει, δοκιμή χωρίς engine (για παλιότερα formats)
+        except:
             file_content.seek(0)
-            df = pd.read_excel(file_content)
-        
-        df.columns = [str(c).strip() for c in df.columns]
+            df = pd.read_excel(file_content) # Default engine backup
 
-        # 3. Υπολογισμός πωλήσεων (Max-Sum Logic)
-        numeric_cols = df.select_dtypes(include=['number']).columns
-        if not numeric_cols.empty:
-            sums = df[numeric_cols].sum()
+        # 4. Καθαρισμός και Υπολογισμοί
+        df.columns = [str(c).strip() for c in df.columns]
+        numeric_df = df.select_dtypes(include=['number'])
+        
+        if not numeric_df.empty:
+            sums = numeric_df.sum()
             sales_col = "Value Sales" if "Value Sales" in sums else sums.idxmax()
             total_sales = float(sums[sales_col])
         else:
             total_sales = 0
-            sales_col = "None found"
+            sales_col = "None"
 
-        # 4. Ενημέρωση Supabase
         result = {
             "total_sales": round(total_sales, 2),
             "total_volume": len(df),
@@ -51,16 +53,21 @@ async def analyze_excel(request: Request):
             "status": "success"
         }
 
+        # 5. Ενημέρωση Supabase
         supabase.table("projects").update({
             "analysis_status": "completed",
             "analysis_json": result
         }).eq("id", project_id).execute()
         
+        print("Analysis completed successfully")
         return {"status": "success"}
 
     except Exception as e:
-        supabase.table("projects").update({
-            "analysis_status": "failed",
-            "analysis_json": {"error": str(e)}
-        }).eq("id", project_id).execute()
-        return {"status": "error", "message": str(e)}
+        error_str = str(e)
+        print(f"Error: {error_str}")
+        if project_id:
+            supabase.table("projects").update({
+                "analysis_status": "failed",
+                "analysis_json": {"error": error_str}
+            }).eq("id", project_id).execute()
+        return {"status": "error", "message": error_str}
