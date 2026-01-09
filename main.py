@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*)"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
@@ -26,30 +26,41 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. Εντοπισμός στηλών
+        # 1. Mapping Στηλών
         sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος", "Value"])
-        brand_col = get_best_column(df, ["Brand", "Μάρκα", "Επωνυμία", "Κατασκευαστής", "Manufacturer"])
-        qty_col = get_best_column(df, ["Qty", "Quantity", "Ποσότητα", "Units", "Τεμάχια"])
+        brand_col = get_best_column(df, ["Brand", "Μάρκα", "Επωνυμία", "Manufacturer"])
+        prod_col = get_best_column(df, ["Description", "Περιγραφή", "Product", "Προϊόν", "Name"])
+        cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group", "Ομάδα"])
 
-        # 2. Υπολογισμοί με αυστηρό έλεγχο
-        total_sales = pd.to_numeric(df[sales_col], errors='coerce').sum() if sales_col else 0
-        
-        # Αν δεν υπάρχει στήλη Qty, το θέτουμε None
-        total_qty = int(pd.to_numeric(df[qty_col], errors='coerce').sum()) if qty_col else None
-        
-        # 3. Brands Distribution
+        # 2. Υπολογισμοί
+        df[sales_col] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
+        total_sales = float(df[sales_col].sum())
+
+        # Top 10 Products
+        top_products = []
+        if prod_col and sales_col:
+            prod_summary = df.groupby(prod_col)[sales_col].sum().sort_values(ascending=False).head(10)
+            top_products = [{"name": str(k), "sales": float(v)} for k, v in prod_summary.items()]
+
+        # Top Brands
         top_brands = []
         if brand_col and sales_col:
-            # Καθαρισμός κενών στα brands
-            df[brand_col] = df[brand_col].astype(str).str.strip()
             brand_summary = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(5)
             top_brands = [{"name": str(k), "value": float(v)} for k, v in brand_summary.items()]
 
+        # Category Analysis
+        categories = []
+        if cat_col and sales_col:
+            cat_summary = df.groupby(cat_col)[sales_col].sum().sort_values(ascending=False)
+            categories = [{"name": str(k), "value": float(v)} for k, v in cat_summary.items()]
+
         result = {
-            "total_sales": round(float(total_sales), 2),
-            "total_volume": total_qty, # Μπορεί να είναι null
+            "total_sales": round(total_sales, 2),
+            "total_items": len(df),
+            "top_products": top_products,
             "top_brands": top_brands,
-            "has_brands": len(top_brands) > 0
+            "categories": categories,
+            "status": "success"
         }
 
         supabase.table("projects").update({
