@@ -1,5 +1,7 @@
 import pandas as pd
-import io, os, requests
+import io
+import os
+import requests
 import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +16,6 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Σύνδεση με Supabase
 supabase: Client = create_client(
     os.environ.get("SUPABASE_URL"),
     os.environ.get("SUPABASE_KEY")
@@ -28,36 +29,38 @@ async def analyze_excel(request: Request):
         project_id = body.get("project_id")
         file_url = body.get("file_url")
 
-        # Λήψη αρχείου ως binary
         response = requests.get(file_url, timeout=60)
-        response.raise_for_status()
-        
-        # ΑΝΑΓΝΩΣΗ EXCEL ΜΕ ΠΑΡΑΚΑΜΨΗ ENCODING ERRORS
-        # Το BytesIO διασφαλίζει ότι διαβάζουμε το αρχείο ως binary
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         
-        # Καθαρισμός ονομάτων στηλών από κρυφά σύμβολα
+        # Καθαρισμός κενών στα ονόματα των στηλών
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- ΑΥΣΤΗΡΟ MAPPING ΒΑΣΕΙ ΤΟΥ EXCEL ΣΟΥ ---
-        # Χρησιμοποιούμε τα ονόματα που είδαμε στις φωτογραφίες σου
-        name_col = "SKU_De"
-        sales_col = "Value Sales"
-        net_cost_col = "Net_Price"
-        retail_col = "Sales_Without_V"
-        brand_col = "Brand"
-        cat_col = "Segment"
-
-        # Μετατροπή δεδομένων σε αριθμούς
-        df['sales_val'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        df['net_ret'] = pd.to_numeric(df[retail_col], errors='coerce').fillna(0)
-        df['net_cost'] = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0)
+        # --- ΕΞΥΠΝΟ MAPPING ΜΕ FALLBACKS ---
+        # Product Name
+        name_col = next((c for c in ["SKU_De", "SKU_Description", "Description"] if c in df.columns), df.columns[0])
         
-        # Υπολογισμός Margin %
+        # Sales
+        sales_col = next((c for c in ["Value Sales", "Total Sales", "Sales"] if c in df.columns), None)
+        
+        # Net Price (Κόστος)
+        net_cost_col = next((c for c in ["Net_Price", "Cost", "Net Price"] if c in df.columns), None)
+        
+        # Sales Price (Λιανική)
+        retail_col = next((c for c in ["Sales_Without_V", "Sales_Price_With_V", "Retail Price"] if c in df.columns), None)
+
+        # Brand & Category
+        brand_col = next((c for c in ["Brand", "Μάρκα"] if c in df.columns), None)
+        cat_col = next((c for c in ["Segment", "Category", "Κατηγορία"] if c in df.columns), None)
+
+        # Μετατροπή σε νούμερα
+        df['sales_val'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0) if sales_col else 0
+        df['net_ret'] = pd.to_numeric(df[retail_col], errors='coerce').fillna(0) if retail_col else 0
+        df['net_cost'] = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0) if net_cost_col else 0
+        
+        # GM% Calculation
         df['gm_percent'] = 0
         mask = df['net_ret'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'net_ret'] - df.loc[mask, 'net_cost']) / df.loc[mask, 'net_ret']) * 100
-        df['gm_percent'] = df['gm_percent'].replace([np.inf, -np.inf], 0).fillna(0)
 
         # ABC Analysis
         df = df.sort_values('sales_val', ascending=False)
@@ -69,39 +72,26 @@ async def analyze_excel(request: Request):
         else:
             df['abc_class'] = 'C'
 
-        # Προετοιμασία δεδομένων για το Lovable
         raw_data = []
         for _, row in df.iterrows():
-            # Καθαρισμός κειμένου από μη-ASCII χαρακτήρες για να μην χτυπάει το JSON
-            p_name = str(row[name_col]).encode('ascii', 'ignore').decode('ascii')
+            # Αφαίρεση ειδικών χαρακτήρων από το όνομα για το JSON
+            clean_name = str(row[name_col]).encode('ascii', 'ignore').decode('ascii')
             raw_data.append({
-                "product_name": p_name,
-                "category": str(row[cat_col]),
-                "brand": str(row[brand_col]),
+                "product_name": clean_name,
+                "category": str(row[cat_col]) if cat_col else "General",
+                "brand": str(row[brand_col]) if brand_col else "N/A",
                 "sales": round(float(row['sales_val']), 2),
                 "clean_sales_price": round(float(row['net_ret']), 2),
                 "gm_percent": round(float(row['gm_percent']), 2),
                 "abc_class": str(row['abc_class'])
             })
 
-        result = {
-            "total_sales": round(total_sales, 2),
-            "raw_data": raw_data,
-            "status": "success"
-        }
+        result = {"total_sales": round(total_sales, 2), "raw_data": raw_data, "status": "success"}
 
-        # Ενημέρωση Supabase
-        supabase.table("projects").update({
-            "analysis_status": "completed", 
-            "analysis_json": result
-        }).eq("id", project_id).execute()
-
+        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
         return {"status": "success"}
 
     except Exception as e:
         if project_id:
-            supabase.table("projects").update({
-                "analysis_status": "failed",
-                "analysis_json": {"error": str(e)}
-            }).eq("id", project_id).execute()
+            supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
