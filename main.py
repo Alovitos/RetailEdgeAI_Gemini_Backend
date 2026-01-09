@@ -6,15 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+# Σύνδεση με Supabase
+supabase: Client = create_client(
+    os.environ.get("SUPABASE_URL"),
+    os.environ.get("SUPABASE_KEY")
+)
 
 def get_best_column(df, keywords):
     """Εντοπίζει τη στήλη που ταιριάζει καλύτερα στα keywords"""
     for col in df.columns:
-        if any(key.lower() == str(col).lower().replace(" ", "_") for key in keywords) or \
-           any(key.lower() in str(col).lower() for key in keywords):
+        clean_col = str(col).strip().lower().replace(" ", "_")
+        if any(key.lower() in clean_col for key in keywords):
             return col
     return None
 
@@ -26,53 +36,72 @@ async def analyze_excel(request: Request):
         project_id = body.get("project_id")
         file_url = body.get("file_url")
 
+        # Λήψη αρχείου με timeout
         response = requests.get(file_url, timeout=30)
-        df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         
-        # Καθαρισμός ονομάτων στηλών (αφαίρεση κενών)
+        # Ανάγνωση Excel με θωράκιση ενάντια σε ειδικούς χαρακτήρες (utf-8 fix)
+        try:
+            df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
+        except:
+            df = pd.read_excel(io.BytesIO(response.content))
+
+        # Καθαρισμός ονομάτων στηλών
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. ΑΚΡΙΒΕΣ MAPPING (βάσει του image_1bf323.png)
-        sales_col = get_best_column(df, ["Value_Sales", "Value Sales", "Τζίρος"])
-        net_retail_col = get_best_column(df, ["Sales_Without_VAT", "Sales Without VAT", "Net_Retail"])
-        net_cost_col = get_best_column(df, ["Net_Price", "Net Price", "Cost_Price"])
-        cat_col = get_best_column(df, ["Category", "Κατηγορία"])
-        name_col = get_best_column(df, ["SKU_Desc", "Description", "Είδος"])
-        brand_col = get_best_column(df, ["Brand", "Μάρκα"])
+        # 1. Mapping Στηλών (Βάσει του αρχείου σου)
+        sales_col = get_best_column(df, ["value_sales", "τζίρος", "sales_amount"])
+        net_retail_col = get_best_column(df, ["sales_without_vat", "net_retail", "καθαρή_λιανική"])
+        net_cost_col = get_best_column(df, ["net_price", "cost_price", "τιμή_αγοράς"])
+        cat_col = get_best_column(df, ["category", "κατηγορία"])
+        name_col = get_best_column(df, ["sku_desc", "description", "είδος", "product"])
+        brand_col = get_best_column(df, ["brand", "μάρκα"])
 
-        # 2. Υπολογισμοί χωρίς υποθέσεις
-        # Παίρνουμε απευθείας την καθαρή τιμή πώλησης από το αρχείο
-        df['clean_sales_price'] = pd.to_numeric(df[net_retail_col], errors='coerce').fillna(0)
-        purchase_net = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0)
-        
-        # GM% = (Net Retail - Net Cost) / Net Retail
-        df['gm_percent'] = ((df['clean_sales_price'] - purchase_net) / df['clean_sales_price'].replace(0, np.nan)) * 100
-        df['gm_percent'] = df['gm_percent'].fillna(0).replace([np.inf, -np.inf], 0)
-
-        # 3. Προετοιμασία Data για το Lovable
+        # 2. Υπολογισμοί
         df['sales'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        df['category'] = df[cat_col].astype(str) if cat_col else "General"
-        df['brand'] = df[brand_col].astype(str) if brand_col else "N/A"
-        df['product_name'] = df[name_col].astype(str) if name_col else "Unknown"
+        df['clean_sales_price'] = pd.to_numeric(df[net_retail_col], errors='coerce').fillna(0) if net_retail_col else 0
+        purchase_net = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0) if net_cost_col else 0
+        
+        # GM% Calculation
+        df['gm_percent'] = 0
+        mask = df['clean_sales_price'] > 0
+        df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'clean_sales_price'] - purchase_net) / df.loc[mask, 'clean_sales_price']) * 100
+        df['gm_percent'] = df['gm_percent'].replace([np.inf, -np.inf], 0).fillna(0)
 
-        # ABC Analysis (Dynamic)
-        def calculate_abc(group):
-            group = group.sort_values('sales', ascending=False)
-            total = group['sales'].sum()
-            if total <= 0: return group.assign(abc_class='C')
-            cum_pct = (group['sales'].cumsum() / total) * 100
-            group['abc_class'] = pd.cut(cum_pct, bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
-            return group
+        # 3. ABC Analysis (Dynamic)
+        df = df.sort_values('sales', ascending=False)
+        total_sales = df['sales'].sum()
+        
+        if total_sales > 0:
+            df['cum_perc'] = (df['sales'].cumsum() / total_sales) * 100
+            df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
+        else:
+            df['abc_class'] = 'C'
 
-        df = df.groupby('category', group_keys=False).apply(calculate_abc)
+        # 4. Προετοιμασία JSON για Supabase
+        raw_data = []
+        for _, row in df.iterrows():
+            raw_data.append({
+                "product_name": str(row[name_col]) if name_col else "Unknown",
+                "category": str(row[cat_col]) if cat_col else "General",
+                "brand": str(row[brand_col]) if brand_col else "N/A",
+                "sales": round(float(row['sales']), 2),
+                "clean_sales_price": round(float(row['clean_sales_price']), 2),
+                "gm_percent": round(float(row['gm_percent']), 2),
+                "abc_class": str(row['abc_class'])
+            })
 
         result = {
-            "total_sales": round(float(df['sales'].sum()), 2),
-            "raw_data": df[['product_name', 'category', 'brand', 'sales', 'clean_sales_price', 'abc_class', 'gm_percent']].to_dict(orient='records'),
+            "total_sales": round(float(total_sales), 2),
+            "raw_data": raw_data,
             "status": "success"
         }
 
-        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
+        # Ενημέρωση Supabase
+        supabase.table("projects").update({
+            "analysis_status": "completed", 
+            "analysis_json": result
+        }).eq("id", project_id).execute()
+
         return {"status": "success"}
 
     except Exception as e:
