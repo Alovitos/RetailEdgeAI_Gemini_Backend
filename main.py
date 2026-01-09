@@ -1,5 +1,6 @@
 import pandas as pd
-import io, os, requests, np
+import io, os, requests
+import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
@@ -13,7 +14,11 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+# Σύνδεση με Supabase
+supabase: Client = create_client(
+    os.environ.get("SUPABASE_URL"),
+    os.environ.get("SUPABASE_KEY")
+)
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
@@ -23,18 +28,19 @@ async def analyze_excel(request: Request):
         project_id = body.get("project_id")
         file_url = body.get("file_url")
 
-        # Λήψη αρχείου
+        # Λήψη αρχείου ως binary
         response = requests.get(file_url, timeout=60)
-        file_data = io.BytesIO(response.content)
+        response.raise_for_status()
         
-        # ΑΝΑΓΝΩΣΗ ΜΕ ΠΛΗΡΗ ΠΑΡΑΚΑΜΨΗ ENCODING ERRORS
-        df = pd.read_excel(file_data, engine='openpyxl')
+        # ΑΝΑΓΝΩΣΗ EXCEL ΜΕ ΠΑΡΑΚΑΜΨΗ ENCODING ERRORS
+        # Το BytesIO διασφαλίζει ότι διαβάζουμε το αρχείο ως binary
+        df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         
-        # Καθαρισμός ονομάτων στηλών από κρυφούς χαρακτήρες
-        df.columns = [str(c).strip().encode('ascii', 'ignore').decode('ascii') for c in df.columns]
+        # Καθαρισμός ονομάτων στηλών από κρυφά σύμβολα
+        df.columns = [str(c).strip() for c in df.columns]
 
-        # --- ΑΥΣΤΗΡΟ EXACT MATCHING (image_2b6060.png) ---
-        # Χρησιμοποιούμε τις ακριβείς ονομασίες που βλέπουμε στο Excel σου
+        # --- ΑΥΣΤΗΡΟ MAPPING ΒΑΣΕΙ ΤΟΥ EXCEL ΣΟΥ ---
+        # Χρησιμοποιούμε τα ονόματα που είδαμε στις φωτογραφίες σου
         name_col = "SKU_De"
         sales_col = "Value Sales"
         net_cost_col = "Net_Price"
@@ -42,18 +48,18 @@ async def analyze_excel(request: Request):
         brand_col = "Brand"
         cat_col = "Segment"
 
-        # Μετατροπή σε νούμερα με αφαίρεση τυχόν κειμένου
+        # Μετατροπή δεδομένων σε αριθμούς
         df['sales_val'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
         df['net_ret'] = pd.to_numeric(df[retail_col], errors='coerce').fillna(0)
         df['net_cost'] = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0)
         
-        # Υπολογισμός Margin
+        # Υπολογισμός Margin %
         df['gm_percent'] = 0
         mask = df['net_ret'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'net_ret'] - df.loc[mask, 'net_cost']) / df.loc[mask, 'net_ret']) * 100
         df['gm_percent'] = df['gm_percent'].replace([np.inf, -np.inf], 0).fillna(0)
 
-        # Κατάταξη ABC
+        # ABC Analysis
         df = df.sort_values('sales_val', ascending=False)
         total_sales = float(df['sales_val'].sum())
         
@@ -63,9 +69,10 @@ async def analyze_excel(request: Request):
         else:
             df['abc_class'] = 'C'
 
+        # Προετοιμασία δεδομένων για το Lovable
         raw_data = []
         for _, row in df.iterrows():
-            # Καθαρίζουμε και το κείμενο του προϊόντος από περίεργα bytes
+            # Καθαρισμός κειμένου από μη-ASCII χαρακτήρες για να μην χτυπάει το JSON
             p_name = str(row[name_col]).encode('ascii', 'ignore').decode('ascii')
             raw_data.append({
                 "product_name": p_name,
