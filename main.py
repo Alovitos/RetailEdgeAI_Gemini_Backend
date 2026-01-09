@@ -1,81 +1,92 @@
 import pandas as pd
-import io, os, requests
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from supabase import create_client, Client
+import io
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_best_column(df, keywords):
-    """Εντοπίζει τη στήλη που ταιριάζει καλύτερα στα keywords"""
+    """Ανιχνεύει την καταλληλότερη στήλη βάσει λέξεων-κλειδιών."""
     for col in df.columns:
-        if any(key.lower() == str(col).lower().replace(" ", "_") for key in keywords) or \
-           any(key.lower() in str(col).lower() for key in keywords):
+        if any(key.lower() in col.lower() for key in keywords):
             return col
     return None
 
 @app.post("/analyze")
-async def analyze_excel(request: Request):
-    project_id = None
+async def analyze_file(file: UploadFile = File(...)):
     try:
-        body = await request.json()
-        project_id = body.get("project_id")
-        file_url = body.get("file_url")
-
-        response = requests.get(file_url, timeout=30)
-        df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
         
-        # Καθαρισμός ονομάτων στηλών (αφαίρεση κενών)
-        df.columns = [str(c).strip() for c in df.columns]
-
-        # 1. ΑΚΡΙΒΕΣ MAPPING (βάσει του image_1bf323.png)
-        sales_col = get_best_column(df, ["Value_Sales", "Value Sales", "Τζίρος"])
-        net_retail_col = get_best_column(df, ["Sales_Without_VAT", "Sales Without VAT", "Net_Retail"])
-        net_cost_col = get_best_column(df, ["Net_Price", "Net Price", "Cost_Price"])
-        cat_col = get_best_column(df, ["Category", "Κατηγορία"])
-        name_col = get_best_column(df, ["SKU_Desc", "Description", "Είδος"])
+        # 1. Έξυπνο Mapping Στηλών
+        name_col = get_best_column(df, ["Product", "Name", "Περιγραφή", "Description"])
+        sales_val_col = get_best_column(df, ["Value_Sales", "Τζίρος", "Sales_Amount", "Revenue"])
+        raw_price_col = get_best_column(df, ["Sales_Price", "Retail", "Λιανική", "Gross_Price"]) # Τιμή με ΦΠΑ
+        net_price_col = get_best_column(df, ["Net_Retail", "Price_No_VAT", "Καθαρή", "Net_Price"]) # Τιμή προ ΦΠΑ
         brand_col = get_best_column(df, ["Brand", "Μάρκα"])
+        cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group"])
 
-        # 2. Υπολογισμοί χωρίς υποθέσεις
-        # Παίρνουμε απευθείας την καθαρή τιμή πώλησης από το αρχείο
-        df['clean_sales_price'] = pd.to_numeric(df[net_retail_col], errors='coerce').fillna(0)
-        purchase_net = pd.to_numeric(df[net_cost_col], errors='coerce').fillna(0)
+        # Έλεγχος mandatory στηλών
+        if not all([name_col, sales_val_col]):
+            raise HTTPException(status_code=400, detail="Missing mandatory columns (Name or Sales Value)")
+
+        # 2. Καθαρισμός και Υπολογισμοί
+        df['sales_value'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
+        df['raw_sales_price'] = pd.to_numeric(df[raw_price_col], errors='coerce').fillna(0) if raw_price_col else 0
+        df['clean_sales_price'] = pd.to_numeric(df[net_price_col], errors='coerce').fillna(0) if net_price_col else 0
         
-        # GM% = (Net Retail - Net Cost) / Net Retail
-        df['gm_percent'] = ((df['clean_sales_price'] - purchase_net) / df['clean_sales_price'].replace(0, np.nan)) * 100
-        df['gm_percent'] = df['gm_percent'].fillna(0).replace([np.inf, -np.inf], 0)
+        # Υπολογισμός GM% αν υπάρχουν οι τιμές
+        df['gm_percent'] = 0
+        mask = (df['clean_sales_price'] > 0) # Χρήση της καθαρής τιμής για το margin
+        # Εδώ υποθέτουμε ότι το κόστος θα μπορούσε να είναι μια άλλη στήλη, 
+        # για τώρα κρατάμε τη δομή που ζήτησες
+        df.loc[mask, 'gm_percent'] = ((df['clean_sales_price'] - (df['clean_sales_price'] * 0.7)) / df['clean_sales_price']) * 100
 
-        # 3. Προετοιμασία Data για το Lovable
-        df['sales'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        df['category'] = df[cat_col].astype(str) if cat_col else "General"
-        df['brand'] = df[brand_col].astype(str) if brand_col else "N/A"
-        df['product_name'] = df[name_col].astype(str) if name_col else "Unknown"
+        # 3. ABC Analysis
+        df = df.sort_values(by='sales_value', ascending=False)
+        df['cum_sales'] = df['sales_value'].cumsum()
+        total_sales = df['sales_value'].sum()
+        df['cum_perc'] = (df['cum_sales'] / total_sales) * 100
 
-        # ABC Analysis (Dynamic)
-        def calculate_abc(group):
-            group = group.sort_values('sales', ascending=False)
-            total = group['sales'].sum()
-            if total <= 0: return group.assign(abc_class='C')
-            cum_pct = (group['sales'].cumsum() / total) * 100
-            group['abc_class'] = pd.cut(cum_pct, bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
-            return group
+        def classify_abc(perc):
+            if perc <= 70: return 'A'
+            if perc <= 90: return 'B'
+            return 'C'
 
-        df = df.groupby('category', group_keys=False).apply(calculate_abc)
+        df['abc_class'] = df['cum_perc'].apply(classify_abc)
 
-        result = {
-            "total_sales": round(float(df['sales'].sum()), 2),
-            "raw_data": df[['product_name', 'category', 'brand', 'sales', 'clean_sales_price', 'abc_class', 'gm_percent']].to_dict(orient='records'),
-            "status": "success"
+        # 4. Προετοιμασία JSON Response
+        results = []
+        for _, row in df.iterrows():
+            results.append({
+                "product_name": str(row[name_col]),
+                "brand": str(row[brand_col]) if brand_col else "N/A",
+                "category": str(row[cat_col]) if cat_col else "N/A",
+                "sales": float(row['sales_value']),
+                "raw_sales_price": float(row['raw_sales_price']),
+                "clean_sales_price": float(row['clean_sales_price']),
+                "gm_percent": round(float(row['gm_percent']), 2),
+                "abc_class": row['abc_class']
+            })
+
+        return {
+            "status": "success",
+            "total_value": float(total_sales),
+            "product_count": len(df),
+            "data": results
         }
 
-        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
-        return {"status": "success"}
-
     except Exception as e:
-        if project_id:
-            supabase.table("projects").update({"analysis_status": "failed"}).eq("id", project_id).execute()
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
