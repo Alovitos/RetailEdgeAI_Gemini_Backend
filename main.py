@@ -37,7 +37,7 @@ async def analyze_excel(request: Request):
         df.columns = [str(c).strip() for c in df.columns]
 
         # --- ΣΤΑΘΕΡΟ MAPPING ΠΟΥ ΔΟΥΛΕΥΕΙ ---
-        name_col = "SKU_De"       # Περιγραφή Προϊόντος
+        name_col = "SKU_Description"       # Περιγραφή Προϊόντος
         sales_val_col = "Value Sales"  # Συνολικός Τζίρος (π.χ. 237.000€)
         
         # --- MAPPING ΤΙΜΩΝ ΒΑΣΕΙ ΟΔΗΓΙΩΝ ΣΟΥ ---
