@@ -26,49 +26,38 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. Mapping
+        # 1. Mapping & Cleaning
         sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος", "Value"])
         price_col = get_best_column(df, ["Price", "Τιμή", "Rate", "Unit Price"])
         brand_col = get_best_column(df, ["Brand", "Μάρκα", "Επωνυμία"])
         cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group"])
-        code_col = get_best_column(df, ["SKU", "Code", "Κωδικός"])
         desc_col = get_best_column(df, ["Description", "Περιγραφή", "Name"])
+        code_col = get_best_column(df, ["SKU", "Code", "Κωδικός"])
 
-        # 2. Καθαρισμός & Προετοιμασία
         df['sales'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
-        df['unit_price'] = pd.to_numeric(df[price_col], errors='coerce').fillna(0) if price_col else 0
+        df['unit_price'] = pd.to_numeric(df[price_col], errors='coerce').fillna(0)
         df['brand'] = df[brand_col].astype(str).str.strip() if brand_col else "N/A"
         df['category'] = df[cat_col].astype(str).str.strip() if cat_col else "N/A"
-        
-        if code_col and desc_col:
-            df['product'] = df[code_col].astype(str) + " - " + df[desc_col].astype(str)
-        else:
-            df['product'] = df[desc_col] if desc_col else "Unknown"
+        df['product'] = (df[code_col].astype(str) + " - " + df[desc_col].astype(str)) if code_col and desc_col else df[desc_col]
 
-        # 3. ABC Analysis (Υπολογισμός ανά τεμάχιο/γραμμή)
+        # 2. Advanced ABC Analysis
         df = df.sort_values(by='sales', ascending=False).reset_index(drop=True)
         df['cum_sales'] = df['sales'].cumsum()
-        total_sum = df['sales'].sum()
-        df['cum_percent'] = (df['cum_sales'] / total_sum) * 100
-
-        # Ορισμός ορίων
-        def classify_abc(row):
-            if row['cum_percent'] <= 70: return 'A'
-            elif row['cum_percent'] <= 90: return 'B'
-            else: return 'C'
+        total_sales = df['sales'].sum()
+        df['cum_percent'] = (df['cum_sales'] / total_sales) * 100
         
-        df['abc_class'] = df.apply(classify_abc, axis=1)
+        df['abc_class'] = pd.cut(df['cum_percent'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C'])
+        
+        abc_counts = df['abc_class'].value_counts().to_dict()
+        abc_stats = {
+            "A": {"items": int(abc_counts.get('A', 0)), "revenue_pct": 70, "desc": "Top 70% of Revenue - Critical Inventory"},
+            "B": {"items": int(abc_counts.get('B', 0)), "revenue_pct": 20, "desc": "Next 20% of Revenue - Regular Items"},
+            "C": {"items": int(abc_counts.get('C', 0)), "revenue_pct": 10, "desc": "Final 10% of Revenue - Slow Movers"}
+        }
 
-        # 4. Σύνοψη για τα γραφήματα
-        abc_summary = df['abc_class'].value_counts().to_dict()
-        abc_stats = [
-            {"name": "Class A (High Value)", "value": int(abc_summary.get('A', 0)), "color": "#22c55e"},
-            {"name": "Class B (Medium Value)", "value": int(abc_summary.get('B', 0)), "color": "#f59e0b"},
-            {"name": "Class C (Low Value)", "value": int(abc_summary.get('C', 0)), "color": "#ef4444"}
-        ]
-
+        # 3. Final JSON
         result = {
-            "total_sales": round(float(total_sum), 2),
+            "total_sales": round(float(total_sales), 2),
             "total_items": len(df),
             "abc_stats": abc_stats,
             "raw_data": df[['brand', 'category', 'product', 'sales', 'abc_class', 'unit_price']].to_dict(orient='records'),
