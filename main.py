@@ -29,29 +29,45 @@ async def analyze_excel(request: Request):
         # 1. Mapping Στηλών
         sales_col = get_best_column(df, ["Total Sales", "Συνολικές Πωλήσεις", "Value Sales", "Τζίρος", "Value"])
         brand_col = get_best_column(df, ["Brand", "Μάρκα", "Επωνυμία", "Manufacturer"])
-        prod_col = get_best_column(df, ["Description", "Περιγραφή", "Product", "Προϊόν", "Name", "SKU"])
-        cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group", "Ομάδα"])
-
-        # 2. Προετοιμασία Δεδομένων
-        df[sales_col] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
+        cat_col = get_best_column(df, ["Category", "Κατηγορία", "Group", "Ομάδα", "Department"])
         
-        # 3. Εξαγωγή Φίλτρων (Unique Values)
-        filters = {
-            "brands": sorted(df[brand_col].dropna().unique().tolist()) if brand_col else [],
-            "categories": sorted(df[cat_col].dropna().unique().tolist()) if cat_col else [],
-            "products": sorted(df[prod_col].dropna().unique().tolist()) if prod_col else []
-        }
+        # Εντοπισμός Κωδικού και Περιγραφής
+        code_col = get_best_column(df, ["SKU", "Code", "Κωδικός", "Item No"])
+        desc_col = get_best_column(df, ["Description", "Περιγραφή", "Name", "Προϊόν"])
 
-        # 4. Αρχικά Analytics (Full View)
-        brand_summary = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(10) if brand_col else pd.Series()
-        prod_summary = df.groupby(prod_col)[sales_col].sum().sort_values(ascending=False).head(10) if prod_col else pd.Series()
+        # 2. Δημιουργία Full Product Name (Κωδικός - Περιγραφή)
+        if code_col and desc_col:
+            df['display_name'] = df[code_col].astype(str) + " - " + df[desc_col].astype(str)
+        elif desc_col:
+            df['display_name'] = df[desc_col]
+        else:
+            df['display_name'] = df[code_col] if code_col else "Unknown Product"
+
+        # 3. Καθαρισμός αριθμητικών
+        df[sales_col] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
+
+        # 4. Προετοιμασία Δεδομένων για Φίλτρα
+        # Παίρνουμε μοναδικές τιμές και αφαιρούμε τα NaNs
+        unique_brands = sorted([str(x) for x in df[brand_col].dropna().unique()]) if brand_col else []
+        unique_cats = sorted([str(x) for x in df[cat_col].dropna().unique()]) if cat_col else []
+        unique_products = sorted([str(x) for x in df['display_name'].dropna().unique()])
+
+        # 5. Analytics
+        brand_summary = df.groupby(brand_col)[sales_col].sum().sort_values(ascending=False).head(10).to_dict() if brand_col else {}
+        cat_summary = df.groupby(cat_col)[sales_col].sum().sort_values(ascending=False).to_dict() if cat_col else {}
+        prod_summary = df.groupby('display_name')[sales_col].sum().sort_values(ascending=False).head(15).to_dict()
 
         result = {
             "total_sales": round(float(df[sales_col].sum()), 2),
-            "filters": filters,
-            "top_brands": [{"name": str(k), "value": float(v)} for k, v in brand_summary.items()],
-            "top_products": [{"name": str(k), "sales": float(v)} for k, v in prod_summary.items()],
-            "raw_data": df.to_dict(orient='records'), # Στέλνουμε τα δεδομένα για να φιλτράρει το Lovable τοπικά
+            "filters": {
+                "brands": unique_brands,
+                "categories": unique_cats,
+                "products": unique_products
+            },
+            "top_brands": [{"name": k, "value": v} for k, v in brand_summary.items()],
+            "top_categories": [{"name": k, "value": v} for k, v in cat_summary.items()],
+            "top_products": [{"name": k, "sales": v} for k, v in prod_summary.items()],
+            "raw_data": df.to_dict(orient='records'),
             "status": "success"
         }
 
@@ -63,4 +79,4 @@ async def analyze_excel(request: Request):
         return {"status": "success"}
     except Exception as e:
         supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
-        return {"status": "error"}
+        return {"status": "error", "message": str(e)}
