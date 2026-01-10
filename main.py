@@ -16,11 +16,26 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Σύνδεση με Supabase
 supabase: Client = create_client(
     os.environ.get("SUPABASE_URL"),
     os.environ.get("SUPABASE_KEY")
 )
+
+def get_smart_elasticity(category_name, product_name):
+    """Επιστρέφει προτεινόμενο Price Elasticity βάσει βιβλιογραφίας"""
+    cat = str(category_name).lower()
+    prod = str(product_name).lower()
+    
+    # 1. Ανελαστικά προϊόντα (Είδη πρώτης ανάγκης: -0.5 έως -0.8)
+    if any(x in cat or x in prod for x in ['milk', 'bread', 'water', 'baby', 'γάλα', 'ψωμί', 'νερό']):
+        return -0.7
+    
+    # 2. Πολύ ελαστικά προϊόντα (Snacks, Παγωτά, Πολυτελείας: -2.5 έως -4.0)
+    if any(x in cat or x in prod for x in ['ice cream', 'snack', 'chocolate', 'παγωτό', 'γλυκό', 'chips']):
+        return -3.0
+    
+    # 3. Standard Retail Default (Μέσος όρος: -1.5 έως -2.0)
+    return -1.8
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
@@ -32,18 +47,15 @@ async def analyze_excel(request: Request):
 
         response = requests.get(file_url, timeout=60)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
-        
-        # Καθαρισμός κενών στα ονόματα των στηλών
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- ΣΤΑΘΕΡΟ MAPPING ΠΟΥ ΔΟΥΛΕΥΕΙ ---
-        name_col = "SKU_Description"       # Περιγραφή Προϊόντος
-        sales_val_col = "Value Sales"  # Συνολικός Τζίρος (π.χ. 237.000€)
-        
-        # --- MAPPING ΤΙΜΩΝ ΒΑΣΕΙ ΟΔΗΓΙΩΝ ΣΟΥ ---
-        retail_with_vat = "Sales_Price_With_VAT"  # Τιμή πώλησης ΜΕ ΦΠΑ (για εμφάνιση)
-        retail_no_vat = "Sales_Without_VAT"     # Τιμή πώλησης ΧΩΡΙΣ ΦΠΑ (για Margin)
-        cost_net = "Net_Price"                  # Τιμή αγοράς / Κόστος (Net Price)
+        # --- ΣΤΑΘΕΡΟ MAPPING ---
+        name_col = "SKU_De"
+        sales_val_col = "Value Sales"
+        retail_with_vat = "Sales_Price_With_V"
+        retail_no_vat = "Sales_Without_V"
+        cost_net = "Net_Price"
+        segment_col = "Segment" if "Segment" in df.columns else None
 
         # Μετατροπή σε νούμερα
         df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
@@ -51,13 +63,12 @@ async def analyze_excel(request: Request):
         df['price_no_vat'] = pd.to_numeric(df[retail_no_vat], errors='coerce').fillna(0)
         df['cost_net'] = pd.to_numeric(df[cost_net], errors='coerce').fillna(0)
         
-        # Υπολογισμός Margin % (GM%) βασισμένος στις Net τιμές
-        # Formula: ((Retail_No_Vat - Cost_Net) / Retail_No_Vat) * 100
+        # Υπολογισμός Margin %
         df['gm_percent'] = 0.0
         mask = df['price_no_vat'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'price_no_vat'] - df.loc[mask, 'cost_net']) / df.loc[mask, 'price_no_vat']) * 100
         
-        # ABC Analysis (Σταθερή λογική)
+        # ABC Analysis
         df = df.sort_values('sales_total', ascending=False)
         total_sales_sum = float(df['sales_total'].sum())
         
@@ -69,24 +80,30 @@ async def analyze_excel(request: Request):
 
         raw_data = []
         for _, row in df.iterrows():
+            p_name = str(row[name_col])
+            p_cat = str(row[segment_col]) if segment_col else "General"
+            
+            # Προσθήκη έξυπνης ελαστικότητας
+            suggested_elasticity = get_smart_elasticity(p_cat, p_name)
+            
             raw_data.append({
-                "product_name": str(row[name_col]),
-                "category": str(row["Segment"]) if "Segment" in df.columns else "General",
+                "product_name": p_name,
+                "category": p_cat,
                 "brand": str(row["Brand"]) if "Brand" in df.columns else "N/A",
-                "sales": round(float(row['sales_total']), 2),
-                "clean_sales_price": round(float(row['price_vat']), 2), # Εμφάνιση Τιμής ΜΕ ΦΠΑ
-                "net_price": round(float(row['cost_net']), 2),           # Εμφάνιση Net Price (Κόστος)
-                "gm_percent": round(float(row['gm_percent']), 1),        # Margin υπολογισμένο ΧΩΡΙΣ ΦΠΑ
-                "abc_class": str(row['abc_class'])
+                "sales": int(round(float(row['sales_total']), 0)), 
+                "clean_sales_price": round(float(row['price_vat']), 2),
+                "net_price": round(float(row['cost_net']), 2),
+                "gm_percent": round(float(row['gm_percent']), 1),
+                "abc_class": str(row['abc_class']),
+                "suggested_elasticity": suggested_elasticity # Νέο πεδίο για το Simulator
             })
 
         result = {
-            "total_sales": round(total_sales_sum, 2), 
+            "total_sales": int(round(total_sales_sum, 0)), 
             "raw_data": raw_data, 
             "status": "success"
         }
 
-        # Ενημέρωση Supabase
         supabase.table("projects").update({
             "analysis_status": "completed", 
             "analysis_json": result
