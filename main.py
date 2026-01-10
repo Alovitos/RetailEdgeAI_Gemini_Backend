@@ -47,11 +47,11 @@ async def analyze_excel(request: Request):
         df.columns = [str(c).strip() for c in df.columns]
 
         # --- MAPPING ΣΤΗΛΩΝ ---
-        name_col = "SKU_De"
+        name_col = "SKU_Description"
         sales_val_col = "Value Sales"
         unit_sales_col = "Unit Sales"  # Η νέα στήλη
-        retail_with_vat = "Sales_Price_With_V"
-        retail_no_vat = "Sales_Without_V"
+        retail_with_vat = "Sales_Price_With_VAT"
+        retail_no_vat = "Sales_Without_VAT"
         cost_net = "Net_Price"
         segment_col = "Segment" if "Segment" in df.columns else None
 
