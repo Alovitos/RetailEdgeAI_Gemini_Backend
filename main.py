@@ -19,58 +19,20 @@ app.add_middleware(
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
 def get_smart_elasticity(category_name, product_name):
-    """
-    Επιστρέφει Price Elasticity βάσει εκτενούς έρευνας FMCG (Nielsen, IRI, Academic Data).
-    Περιλαμβάνει Ελληνικά και Αγγλικά keywords.
-    """
+    """Επιστρέφει Price Elasticity βάσει FMCG βιβλιογραφίας (Ελληνικά/Αγγλικά)"""
     text = (str(category_name) + " " + str(product_name)).lower()
     
-    # ΟΜΑΔΑ 1: ΠΟΛΥ ΑΝΕΛΑΣΤΙΚΑ (-0.4 έως -0.9)
-    # Προϊόντα ανάγκης, εθισμού ή χωρίς υποκατάστατα.
-    inelastic_low = [
-        'milk', 'bread', 'water', 'baby', 'diaper', 'pampers', 'nappy', 'formula',
-        'tobacco', 'cigarettes', 'medicine', 'egg', 'oil', 'flour', 'sugar',
-        'γάλα', 'ψωμί', 'νερό', 'μωρό', 'πάνες', 'βρεφικά', 'τσιγάρα', 'καπνός', 
-        'φάρμακα', 'αυγό', 'λάδι', 'ελαιόλαδο', 'αλεύρι', 'ζάχαρη'
-    ]
-    if any(x in text for x in inelastic_low):
+    # ΠΑΝΕΣ / ΒΡΕΦΙΚΑ (Ανελαστικά)
+    if any(x in text for x in ['baby', 'diaper', 'pampers', 'nappy', 'πάνες', 'βρεφικά', 'μωρό']):
         return -0.6
-
-    # ΟΜΑΔΑ 2: ΣΧΕΤΙΚΑ ΑΝΕΛΑΣΤΙΚΑ (-1.0 έως -1.5)
-    # Βασικά είδη καθημερινότητας με κάποια πιστότητα brand.
-    semi_inelastic = [
-        'coffee', 'tea', 'butter', 'cheese', 'pasta', 'rice', 'meat', 'chicken',
-        'toilet paper', 'toothpaste', 'soap', 'deodorant', 'sanitary',
-        'καφές', 'τσάι', 'βούτυρο', 'τυρί', 'μακαρόνια', 'ρύζι', 'κρέας', 'κοτόπουλο',
-        'χαρτί υγείας', 'οδοντόκρεμα', 'σαπούνι', 'αποσμητικό', 'σερβιέτες'
-    ]
-    if any(x in text for x in semi_inelastic):
-        return -1.2
-
-    # ΟΜΑΔΑ 3: ΜΕΤΡΙΑ ΕΛΑΣΤΙΚΑ (-1.6 έως -2.5)
-    # Standard FMCG, γιαούρτια, απορρυπαντικά, δημητριακά.
-    medium_elastic = [
-        'yogurt', 'cereal', 'detergent', 'softener', 'shampoo', 'conditioner', 
-        'frozen', 'pizza', 'ready meal', 'canned', 'beans', 'vegetables',
-        'γιαούρτι', 'δημητριακά', 'απορρυπαντικό', 'μαλακτικό', 'σαμπουάν', 
-        'κατεψυγμένα', 'πίτσα', 'έτοιμο γεύμα', 'κονσέρβα', 'όσπρια', 'λαχανικά'
-    ]
-    if any(x in text for x in medium_elastic):
-        return -1.9
-
-    # ΟΜΑΔΑ 4: ΠΟΛΥ ΕΛΑΣΤΙΚΑ (-2.6 έως -4.5)
-    # Snacks, Αναψυκτικά, Αλκοόλ, Παγωτά, Πολυτελείας.
-    highly_elastic = [
-        'ice cream', 'snack', 'chocolate', 'chips', 'lays', 'cheetos', 'soda', 'cola',
-        'beer', 'wine', 'whiskey', 'alcohol', 'cookies', 'biscuits', 'juice', 'energy drink',
-        'παγωτό', 'γλυκό', 'τσιπς', 'γαριδάκια', 'αναψυκτικό', 'σοκολάτα', 'μπύρα', 
-        'κρασί', 'ποτό', 'αλκοόλ', 'μπισκότα', 'χυμός', 'energy drink'
-    ]
-    if any(x in text for x in highly_elastic):
+    # SNACKS / CHIPS / ΠΑΓΩΤΑ (Πολύ Ελαστικά)
+    if any(x in text for x in ['ice cream', 'snack', 'chocolate', 'chips', 'lays', 'παγωτό', 'τσιπς', 'γαριδάκια']):
         return -3.2
-    
-    # Default τιμή για αταξινόμητα FMCG
-    return -1.6
+    # ΓΙΑΟΥΡΤΙ / ΤΥΡΙ / ΓΑΛΑΚΤΟΚΟΜΙΚΑ (Μεσαία)
+    if any(x in text for x in ['yogurt', 'cheese', 'milk', 'γιαούρτι', 'τυρί', 'γάλα']):
+        return -1.5
+    # DEFAULT για τα υπόλοιπα
+    return -1.8
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
@@ -84,23 +46,28 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Mapping (Κρατάμε το σταθερό που δουλεύει)
+        # --- MAPPING ΣΤΗΛΩΝ ---
         name_col = "SKU_De"
         sales_val_col = "Value Sales"
+        unit_sales_col = "Unit Sales"  # Η νέα στήλη
         retail_with_vat = "Sales_Price_With_V"
         retail_no_vat = "Sales_Without_V"
         cost_net = "Net_Price"
         segment_col = "Segment" if "Segment" in df.columns else None
 
+        # Μετατροπή σε αριθμούς
         df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
+        df['units_total'] = pd.to_numeric(df[unit_sales_col], errors='coerce').fillna(0)
         df['price_vat'] = pd.to_numeric(df[retail_with_vat], errors='coerce').fillna(0)
         df['price_no_vat'] = pd.to_numeric(df[retail_no_vat], errors='coerce').fillna(0)
         df['cost_net'] = pd.to_numeric(df[cost_net], errors='coerce').fillna(0)
         
+        # Υπολογισμός Margin %
         df['gm_percent'] = 0.0
         mask = df['price_no_vat'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'price_no_vat'] - df.loc[mask, 'cost_net']) / df.loc[mask, 'price_no_vat']) * 100
         
+        # ABC Analysis
         df = df.sort_values('sales_total', ascending=False)
         total_sales_sum = float(df['sales_total'].sum())
         
@@ -114,18 +81,17 @@ async def analyze_excel(request: Request):
         for _, row in df.iterrows():
             p_name = str(row[name_col])
             p_cat = str(row[segment_col]) if segment_col else ""
-            suggested_elasticity = get_smart_elasticity(p_cat, p_name)
             
             raw_data.append({
                 "product_name": p_name,
                 "category": p_cat,
-                "brand": str(row["Brand"]) if "Brand" in df.columns else "N/A",
+                "units": int(row['units_total']), # ΝΕΟ ΠΕΔΙΟ
                 "sales": int(round(float(row['sales_total']), 0)), 
                 "clean_sales_price": round(float(row['price_vat']), 2),
                 "net_price": round(float(row['cost_net']), 2),
                 "gm_percent": round(float(row['gm_percent']), 1),
                 "abc_class": str(row['abc_class']),
-                "suggested_elasticity": float(suggested_elasticity)
+                "suggested_elasticity": float(get_smart_elasticity(p_cat, p_name))
             })
 
         result = {"total_sales": int(round(total_sales_sum, 0)), "raw_data": raw_data, "status": "success"}
