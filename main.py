@@ -16,16 +16,23 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+# Σύνδεση με Supabase
+supabase: Client = create_client(
+    os.environ.get("SUPABASE_URL"),
+    os.environ.get("SUPABASE_KEY")
+)
 
 def get_smart_elasticity(category_name, product_name):
-    """Επιστρέφει Price Elasticity βάσει FMCG βιβλιογραφίας"""
+    """Επιστρέφει Price Elasticity βάσει FMCG βιβλιογραφίας (Ελληνικά/Αγγλικά)"""
     text = (str(category_name) + " " + str(product_name)).lower()
-    if any(x in text for x in ['baby', 'diaper', 'pampers', 'πάνες', 'βρεφικά']):
+    # Ανελαστικά (Βρεφικά, Γάλα κλπ)
+    if any(x in text for x in ['baby', 'diaper', 'pampers', 'nappy', 'πάνες', 'βρεφικά', 'μωρό', 'milk', 'γάλα']):
         return -0.6
-    if any(x in text for x in ['ice cream', 'snack', 'chips', 'lays', 'παγωτό', 'τσιπς']):
+    # Πολύ Ελαστικά (Chips, Παγωτά, Snacks)
+    if any(x in text for x in ['ice cream', 'snack', 'chocolate', 'chips', 'lays', 'παγωτό', 'τσιπς', 'γαριδάκια']):
         return -3.2
-    if any(x in text for x in ['yogurt', 'cheese', 'milk', 'γιαούρτι', 'τυρί']):
+    # Μεσαία (Γιαούρτι, Τυρί)
+    if any(x in text for x in ['yogurt', 'cheese', 'γιαούρτι', 'τυρί']):
         return -1.5
     return -1.8
 
@@ -40,26 +47,27 @@ async def analyze_excel(request: Request):
         response = requests.get(file_url, timeout=60)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         
-        # Καθαρισμός κενών στους τίτλους στηλών
+        # Καθαρισμός κενών στους τίτλους στηλών για αποφυγή KeyErrors
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- ΑΚΡΙΒΕΣ MAPPING ΒΑΣΕΙ ΤΩΝ ΕΙΚΟΝΩΝ ΣΟΥ ---
-        name_col = "SKU_Description"  # Διορθώθηκε
+        # --- ΟΡΙΣΤΙΚΟ MAPPING ΒΑΣΕΙ ΤΩΝ ΕΙΚΟΝΩΝ ΣΟΥ ---
+        name_col = "SKU_Description"
         sales_val_col = "Value Sales"
         unit_sales_col = "Unit Sales"
-        retail_with_vat = "Sales_Price_With_VAT"  # Διορθώθηκε
-        retail_no_vat = "Sales_Without_VAT"      # Διορθώθηκε
+        retail_with_vat = "Sales_Price_With_VAT"
+        retail_no_vat = "Sales_Without_VAT"
         cost_net = "Net_Price"
         segment_col = "Segment"
+        brand_col = "Brand"
 
-        # Μετατροπή σε αριθμούς
+        # Μετατροπή σε αριθμούς με ασφάλεια
         df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
         df['units_total'] = pd.to_numeric(df[unit_sales_col], errors='coerce').fillna(0)
         df['price_vat'] = pd.to_numeric(df[retail_with_vat], errors='coerce').fillna(0)
         df['price_no_vat'] = pd.to_numeric(df[retail_no_vat], errors='coerce').fillna(0)
         df['cost_net'] = pd.to_numeric(df[cost_net], errors='coerce').fillna(0)
         
-        # Υπολογισμός Margin %
+        # Υπολογισμός Margin % (GM%)
         df['gm_percent'] = 0.0
         mask = df['price_no_vat'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'price_no_vat'] - df.loc[mask, 'cost_net']) / df.loc[mask, 'price_no_vat']) * 100
@@ -78,11 +86,17 @@ async def analyze_excel(request: Request):
         raw_data = []
         for _, row in df.iterrows():
             p_name = str(row[name_col])
-            p_cat = str(row[segment_col])
+            p_cat = str(row[segment_col]) if segment_col in df.columns else "General"
+            p_brand = str(row[brand_col]).strip() if brand_col in df.columns else "Unknown"
             
+            # Διόρθωση για NaN τιμές στα Brands
+            if p_brand.lower() == "nan" or not p_brand:
+                p_brand = "Generic"
+
             raw_data.append({
                 "product_name": p_name,
                 "category": p_cat,
+                "brand": p_brand,
                 "units": int(row['units_total']),
                 "sales": int(round(float(row['sales_total']), 0)), 
                 "clean_sales_price": round(float(row['price_vat']), 2),
@@ -99,6 +113,7 @@ async def analyze_excel(request: Request):
             "status": "success"
         }
 
+        # Ενημέρωση Supabase
         supabase.table("projects").update({
             "analysis_status": "completed", 
             "analysis_json": result
