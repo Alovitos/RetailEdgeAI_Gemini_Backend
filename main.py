@@ -19,19 +19,14 @@ app.add_middleware(
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
 def get_smart_elasticity(category_name, product_name):
-    """Επιστρέφει Price Elasticity βάσει FMCG βιβλιογραφίας (Ελληνικά/Αγγλικά)"""
+    """Επιστρέφει Price Elasticity βάσει FMCG βιβλιογραφίας"""
     text = (str(category_name) + " " + str(product_name)).lower()
-    
-    # ΠΑΝΕΣ / ΒΡΕΦΙΚΑ (Ανελαστικά)
-    if any(x in text for x in ['baby', 'diaper', 'pampers', 'nappy', 'πάνες', 'βρεφικά', 'μωρό']):
+    if any(x in text for x in ['baby', 'diaper', 'pampers', 'πάνες', 'βρεφικά']):
         return -0.6
-    # SNACKS / CHIPS / ΠΑΓΩΤΑ (Πολύ Ελαστικά)
-    if any(x in text for x in ['ice cream', 'snack', 'chocolate', 'chips', 'lays', 'παγωτό', 'τσιπς', 'γαριδάκια']):
+    if any(x in text for x in ['ice cream', 'snack', 'chips', 'lays', 'παγωτό', 'τσιπς']):
         return -3.2
-    # ΓΙΑΟΥΡΤΙ / ΤΥΡΙ / ΓΑΛΑΚΤΟΚΟΜΙΚΑ (Μεσαία)
-    if any(x in text for x in ['yogurt', 'cheese', 'milk', 'γιαούρτι', 'τυρί', 'γάλα']):
+    if any(x in text for x in ['yogurt', 'cheese', 'milk', 'γιαούρτι', 'τυρί']):
         return -1.5
-    # DEFAULT για τα υπόλοιπα
     return -1.8
 
 @app.post("/analyze")
@@ -44,16 +39,18 @@ async def analyze_excel(request: Request):
 
         response = requests.get(file_url, timeout=60)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
+        
+        # Καθαρισμός κενών στους τίτλους στηλών
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- MAPPING ΣΤΗΛΩΝ ---
-        name_col = "SKU_Description"
+        # --- ΑΚΡΙΒΕΣ MAPPING ΒΑΣΕΙ ΤΩΝ ΕΙΚΟΝΩΝ ΣΟΥ ---
+        name_col = "SKU_Description"  # Διορθώθηκε
         sales_val_col = "Value Sales"
-        unit_sales_col = "Unit Sales"  # Η νέα στήλη
-        retail_with_vat = "Sales_Price_With_VAT"
-        retail_no_vat = "Sales_Without_VAT"
+        unit_sales_col = "Unit Sales"
+        retail_with_vat = "Sales_Price_With_VAT"  # Διορθώθηκε
+        retail_no_vat = "Sales_Without_VAT"      # Διορθώθηκε
         cost_net = "Net_Price"
-        segment_col = "Segment" if "Segment" in df.columns else None
+        segment_col = "Segment"
 
         # Μετατροπή σε αριθμούς
         df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
@@ -70,6 +67,7 @@ async def analyze_excel(request: Request):
         # ABC Analysis
         df = df.sort_values('sales_total', ascending=False)
         total_sales_sum = float(df['sales_total'].sum())
+        total_units_sum = int(df['units_total'].sum())
         
         if total_sales_sum > 0:
             df['cum_perc'] = (df['sales_total'].cumsum() / total_sales_sum) * 100
@@ -80,12 +78,12 @@ async def analyze_excel(request: Request):
         raw_data = []
         for _, row in df.iterrows():
             p_name = str(row[name_col])
-            p_cat = str(row[segment_col]) if segment_col else ""
+            p_cat = str(row[segment_col])
             
             raw_data.append({
                 "product_name": p_name,
                 "category": p_cat,
-                "units": int(row['units_total']), # ΝΕΟ ΠΕΔΙΟ
+                "units": int(row['units_total']),
                 "sales": int(round(float(row['sales_total']), 0)), 
                 "clean_sales_price": round(float(row['price_vat']), 2),
                 "net_price": round(float(row['cost_net']), 2),
@@ -94,11 +92,24 @@ async def analyze_excel(request: Request):
                 "suggested_elasticity": float(get_smart_elasticity(p_cat, p_name))
             })
 
-        result = {"total_sales": int(round(total_sales_sum, 0)), "raw_data": raw_data, "status": "success"}
-        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
+        result = {
+            "total_sales": int(round(total_sales_sum, 0)), 
+            "total_units": total_units_sum,
+            "raw_data": raw_data, 
+            "status": "success"
+        }
+
+        supabase.table("projects").update({
+            "analysis_status": "completed", 
+            "analysis_json": result
+        }).eq("id", project_id).execute()
+
         return {"status": "success"}
 
     except Exception as e:
         if project_id:
-            supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
+            supabase.table("projects").update({
+                "analysis_status": "failed",
+                "analysis_json": {"error": str(e)}
+            }).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
