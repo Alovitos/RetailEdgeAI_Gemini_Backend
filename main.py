@@ -16,26 +16,61 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-supabase: Client = create_client(
-    os.environ.get("SUPABASE_URL"),
-    os.environ.get("SUPABASE_KEY")
-)
+supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
 def get_smart_elasticity(category_name, product_name):
-    """Επιστρέφει προτεινόμενο Price Elasticity βάσει βιβλιογραφίας"""
-    cat = str(category_name).lower()
-    prod = str(product_name).lower()
+    """
+    Επιστρέφει Price Elasticity βάσει εκτενούς έρευνας FMCG (Nielsen, IRI, Academic Data).
+    Περιλαμβάνει Ελληνικά και Αγγλικά keywords.
+    """
+    text = (str(category_name) + " " + str(product_name)).lower()
     
-    # 1. Ανελαστικά προϊόντα (Είδη πρώτης ανάγκης: -0.5 έως -0.8)
-    if any(x in cat or x in prod for x in ['milk', 'bread', 'water', 'baby', 'γάλα', 'ψωμί', 'νερό']):
-        return -0.7
+    # ΟΜΑΔΑ 1: ΠΟΛΥ ΑΝΕΛΑΣΤΙΚΑ (-0.4 έως -0.9)
+    # Προϊόντα ανάγκης, εθισμού ή χωρίς υποκατάστατα.
+    inelastic_low = [
+        'milk', 'bread', 'water', 'baby', 'diaper', 'pampers', 'nappy', 'formula',
+        'tobacco', 'cigarettes', 'medicine', 'egg', 'oil', 'flour', 'sugar',
+        'γάλα', 'ψωμί', 'νερό', 'μωρό', 'πάνες', 'βρεφικά', 'τσιγάρα', 'καπνός', 
+        'φάρμακα', 'αυγό', 'λάδι', 'ελαιόλαδο', 'αλεύρι', 'ζάχαρη'
+    ]
+    if any(x in text for x in inelastic_low):
+        return -0.6
+
+    # ΟΜΑΔΑ 2: ΣΧΕΤΙΚΑ ΑΝΕΛΑΣΤΙΚΑ (-1.0 έως -1.5)
+    # Βασικά είδη καθημερινότητας με κάποια πιστότητα brand.
+    semi_inelastic = [
+        'coffee', 'tea', 'butter', 'cheese', 'pasta', 'rice', 'meat', 'chicken',
+        'toilet paper', 'toothpaste', 'soap', 'deodorant', 'sanitary',
+        'καφές', 'τσάι', 'βούτυρο', 'τυρί', 'μακαρόνια', 'ρύζι', 'κρέας', 'κοτόπουλο',
+        'χαρτί υγείας', 'οδοντόκρεμα', 'σαπούνι', 'αποσμητικό', 'σερβιέτες'
+    ]
+    if any(x in text for x in semi_inelastic):
+        return -1.2
+
+    # ΟΜΑΔΑ 3: ΜΕΤΡΙΑ ΕΛΑΣΤΙΚΑ (-1.6 έως -2.5)
+    # Standard FMCG, γιαούρτια, απορρυπαντικά, δημητριακά.
+    medium_elastic = [
+        'yogurt', 'cereal', 'detergent', 'softener', 'shampoo', 'conditioner', 
+        'frozen', 'pizza', 'ready meal', 'canned', 'beans', 'vegetables',
+        'γιαούρτι', 'δημητριακά', 'απορρυπαντικό', 'μαλακτικό', 'σαμπουάν', 
+        'κατεψυγμένα', 'πίτσα', 'έτοιμο γεύμα', 'κονσέρβα', 'όσπρια', 'λαχανικά'
+    ]
+    if any(x in text for x in medium_elastic):
+        return -1.9
+
+    # ΟΜΑΔΑ 4: ΠΟΛΥ ΕΛΑΣΤΙΚΑ (-2.6 έως -4.5)
+    # Snacks, Αναψυκτικά, Αλκοόλ, Παγωτά, Πολυτελείας.
+    highly_elastic = [
+        'ice cream', 'snack', 'chocolate', 'chips', 'lays', 'cheetos', 'soda', 'cola',
+        'beer', 'wine', 'whiskey', 'alcohol', 'cookies', 'biscuits', 'juice', 'energy drink',
+        'παγωτό', 'γλυκό', 'τσιπς', 'γαριδάκια', 'αναψυκτικό', 'σοκολάτα', 'μπύρα', 
+        'κρασί', 'ποτό', 'αλκοόλ', 'μπισκότα', 'χυμός', 'energy drink'
+    ]
+    if any(x in text for x in highly_elastic):
+        return -3.2
     
-    # 2. Πολύ ελαστικά προϊόντα (Snacks, Παγωτά, Πολυτελείας: -2.5 έως -4.0)
-    if any(x in cat or x in prod for x in ['ice cream', 'snack', 'chocolate', 'παγωτό', 'γλυκό', 'chips']):
-        return -3.0
-    
-    # 3. Standard Retail Default (Μέσος όρος: -1.5 έως -2.0)
-    return -1.8
+    # Default τιμή για αταξινόμητα FMCG
+    return -1.6
 
 @app.post("/analyze")
 async def analyze_excel(request: Request):
@@ -49,7 +84,7 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- ΣΤΑΘΕΡΟ MAPPING ---
+        # Mapping (Κρατάμε το σταθερό που δουλεύει)
         name_col = "SKU_De"
         sales_val_col = "Value Sales"
         retail_with_vat = "Sales_Price_With_V"
@@ -57,18 +92,15 @@ async def analyze_excel(request: Request):
         cost_net = "Net_Price"
         segment_col = "Segment" if "Segment" in df.columns else None
 
-        # Μετατροπή σε νούμερα
         df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
         df['price_vat'] = pd.to_numeric(df[retail_with_vat], errors='coerce').fillna(0)
         df['price_no_vat'] = pd.to_numeric(df[retail_no_vat], errors='coerce').fillna(0)
         df['cost_net'] = pd.to_numeric(df[cost_net], errors='coerce').fillna(0)
         
-        # Υπολογισμός Margin %
         df['gm_percent'] = 0.0
         mask = df['price_no_vat'] > 0
         df.loc[mask, 'gm_percent'] = ((df.loc[mask, 'price_no_vat'] - df.loc[mask, 'cost_net']) / df.loc[mask, 'price_no_vat']) * 100
         
-        # ABC Analysis
         df = df.sort_values('sales_total', ascending=False)
         total_sales_sum = float(df['sales_total'].sum())
         
@@ -81,9 +113,7 @@ async def analyze_excel(request: Request):
         raw_data = []
         for _, row in df.iterrows():
             p_name = str(row[name_col])
-            p_cat = str(row[segment_col]) if segment_col else "General"
-            
-            # Προσθήκη έξυπνης ελαστικότητας
+            p_cat = str(row[segment_col]) if segment_col else ""
             suggested_elasticity = get_smart_elasticity(p_cat, p_name)
             
             raw_data.append({
@@ -95,26 +125,14 @@ async def analyze_excel(request: Request):
                 "net_price": round(float(row['cost_net']), 2),
                 "gm_percent": round(float(row['gm_percent']), 1),
                 "abc_class": str(row['abc_class']),
-                "suggested_elasticity": suggested_elasticity # Νέο πεδίο για το Simulator
+                "suggested_elasticity": float(suggested_elasticity)
             })
 
-        result = {
-            "total_sales": int(round(total_sales_sum, 0)), 
-            "raw_data": raw_data, 
-            "status": "success"
-        }
-
-        supabase.table("projects").update({
-            "analysis_status": "completed", 
-            "analysis_json": result
-        }).eq("id", project_id).execute()
-
+        result = {"total_sales": int(round(total_sales_sum, 0)), "raw_data": raw_data, "status": "success"}
+        supabase.table("projects").update({"analysis_status": "completed", "analysis_json": result}).eq("id", project_id).execute()
         return {"status": "success"}
 
     except Exception as e:
         if project_id:
-            supabase.table("projects").update({
-                "analysis_status": "failed",
-                "analysis_json": {"error": str(e)}
-            }).eq("id", project_id).execute()
+            supabase.table("projects").update({"analysis_status": "failed", "analysis_json": {"error": str(e)}}).eq("id", project_id).execute()
         return {"status": "error", "message": str(e)}
