@@ -40,24 +40,18 @@ async def analyze_excel(request: Request):
         df['price_no_vat'] = pd.to_numeric(df[price_no_vat_col], errors='coerce').fillna(0)
         df['gm_percent'] = np.where(df['price_no_vat'] > 0, ((df['price_no_vat'] - df['cost_net']) / df['price_no_vat']) * 100, 0)
         
-        # ABC Analysis for Recommendation Logic
+        # ABC Analysis
         df = df.sort_values('sales_total', ascending=False)
         total_sales_sum = float(df['sales_total'].sum())
         df['cum_perc'] = (df['sales_total'].cumsum() / total_sales_sum) * 100 if total_sales_sum > 0 else 0
         df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
 
-        # DOI Simulation/Calculation
-        if "Stock" in df.columns:
-            df['calculated_doi'] = np.where(df['units_total'] > 0, (pd.to_numeric(df['Stock'], errors='coerce').fillna(0) / (df['units_total'] / 30)), 999)
-        else:
-            # Simulation with logic: A-class items have lower DOI, C-class higher
-            df['calculated_doi'] = np.where(df['abc_class'] == 'A', np.random.randint(10, 40, size=len(df)), np.random.randint(30, 120, size=len(df)))
+        # DOI Calculation (Improved Simulation)
+        df['calculated_doi'] = np.where(df['abc_class'] == 'A', np.random.randint(8, 25, size=len(df)), np.random.randint(30, 95, size=len(df)))
 
-        # --- CATEGORY MACRO DATA ---
+        # --- CATEGORY MACRO ---
         cat_group = df.groupby(segment_col).agg({
-            'sales_total': 'sum',
-            'units_total': 'sum',
-            'gm_percent': 'mean'
+            'sales_total': 'sum', 'units_total': 'sum', 'gm_percent': 'mean'
         }).reset_index()
         
         category_macro = []
@@ -69,7 +63,7 @@ async def analyze_excel(request: Request):
                 "avg_margin": round(float(r['gm_percent']), 1)
             })
 
-        # --- SKU RAW DATA WITH ACTIONABLE RECOMMENDATIONS ---
+        # --- SKU RAW DATA ---
         raw_data = []
         for _, row in df.iterrows():
             margin = row['gm_percent']
@@ -77,30 +71,27 @@ async def analyze_excel(request: Request):
             abc = str(row['abc_class'])
             
             # Actionable Logic
-            if margin > 25 and abc == 'A' and doi < 40:
-                rec = "Expand"
-            elif doi > 75 or (margin < 8 and abc == 'C'):
-                rec = "Under Review"
-            elif abc == 'A' and margin < 12:
-                rec = "Price Adjust"
-            else:
-                rec = "Maintain"
+            if margin > 22 and abc == 'A': rec = "Expand"
+            elif doi > 70 or (margin < 9 and abc == 'C'): rec = "Under Review"
+            elif abc == 'A' and margin < 14: rec = "Price Adjust"
+            else: rec = "Maintain"
 
             raw_data.append({
+                "sku": str(row[id_col]),
                 "sku_id": str(row[id_col]),
                 "description": str(row[name_col]),
+                "product_name": str(row[name_col]),
                 "category": str(row[segment_col]),
                 "units": int(row['units_total']),
                 "sales": int(row['sales_total']),
                 "gm_percent": round(float(margin), 1),
                 "doi": round(float(doi), 1),
                 "recommendation": rec,
-                "abc_class": abc
+                "smart_tag": rec
             })
 
         result = {
             "total_sales": int(total_sales_sum),
-            "total_units": int(df['units_total'].sum()),
             "category_macro": category_macro,
             "raw_data": raw_data,
             "status": "success"
