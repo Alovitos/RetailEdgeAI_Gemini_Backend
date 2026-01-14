@@ -10,6 +10,7 @@ from supabase import create_client, Client
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Supabase Initialization
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
 @app.post("/analyze")
@@ -24,37 +25,42 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- DYNAMIC MAPPING ---
+        # --- 1. DYNAMIC MAPPING (Υποστήριξη για κάθε Excel) ---
         id_col = next((c for c in df.columns if any(x in c.upper() for x in ["ID", "CODE", "ΚΩΔ"])), df.columns[0])
         name_col = next((c for c in df.columns if any(x in c.upper() for x in ["DESC", "NAME", "ΠΕΡΙΓ"])), df.columns[1])
         brand_col = next((c for c in df.columns if "BRAND" in c.upper() or "ΜΑΡΚΑ" in c.upper()), "Brand")
         cat_col = next((c for c in df.columns if any(x in c.upper() for x in ["SEGMENT", "CATEGORY", "ΚΑΤΗΓ"])), "Segment")
 
-        # Basic Conversions
+        if brand_col not in df.columns: df[brand_col] = "N/A"
+        if cat_col not in df.columns: df[cat_col] = "General"
+
+        # Μετατροπή σε αριθμητικά δεδομένα
         df['Value Sales'] = pd.to_numeric(df["Value Sales"], errors='coerce').fillna(0)
         df['Unit Sales'] = pd.to_numeric(df["Unit Sales"], errors='coerce').fillna(0)
         df['Net_Price'] = pd.to_numeric(df["Net_Price"], errors='coerce').fillna(0)
         df['Sales_Without_VAT'] = pd.to_numeric(df["Sales_Without_VAT"], errors='coerce').fillna(0)
         
-        # ABC Analysis (Απαραίτητο για τα δωρεάν dashboards)
+        # --- 2. ABC ANALYSIS (Για το Freemium Dashboard) ---
         df = df.sort_values('Value Sales', ascending=False)
         total_sales = df['Value Sales'].sum()
         df['cum_perc'] = (df['Value Sales'].cumsum() / (total_sales + 0.01)) * 100
         df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
 
-        # --- DATA FOR FREE DASHBOARDS (Legacy Support) ---
-        # Αυτά τα πεδία ψάχνει το "Home" και το "Dashboard"
-        items_for_free = []
+        # --- 3. DATA FOR FREE DASHBOARDS (Παλιά Features) ---
+        items_legacy = []
         for _, row in df.iterrows():
-            items_for_free.append({
+            items_legacy.append({
                 "name": str(row[name_col]),
                 "revenue": float(row['Value Sales']),
                 "units": int(row['Unit Sales']),
                 "abc_class": str(row['abc_class']),
-                "price": float(row['Sales_Without_VAT'])
+                "price": float(row['Sales_Without_VAT']),
+                "brand": str(row[brand_col]),
+                "category": str(row[cat_col])
             })
 
-        # --- DATA FOR EXECUTIVE RGM & PROMO PLANNER (PRO Features) ---
+        # --- 4. DATA FOR EXECUTIVE RGM & PROMO PLANNER (New PRO Features) ---
+        # Category Macro για το Bubble Chart
         category_macro = []
         cat_group = df.groupby(cat_col).agg({'Value Sales': 'sum', 'Unit Sales': 'sum', 'Sales_Without_VAT': 'mean', 'Net_Price': 'mean'}).reset_index()
         for _, r in cat_group.iterrows():
@@ -66,17 +72,17 @@ async def analyze_excel(request: Request):
                 "avg_margin": round(float(margin_pct), 1)
             })
 
+        # SKU Raw Data για το Pro Table και τον Planner
         raw_data_pro = []
         for _, row in df.iterrows():
             margin_pct = ((row['Sales_Without_VAT'] - row['Net_Price']) / row['Sales_Without_VAT'] * 100) if row['Sales_Without_VAT'] > 0 else 0
-            # Elasticity Logic
-            elasticity = -2.4 if row['abc_class'] == 'A' else -1.6
+            elasticity = -2.4 if row['abc_class'] == 'A' else -1.6 # Heuristic
             
             raw_data_pro.append({
                 "sku_id": str(row[id_col]),
                 "description": str(row[name_col]),
                 "category": str(row[cat_col]),
-                "brand": str(row[brand_col]) if brand_col in df.columns else "Generic",
+                "brand": str(row[brand_col]),
                 "units": int(row['Unit Sales']),
                 "sales": float(row['Value Sales']),
                 "gm_percent": round(float(margin_pct), 1),
@@ -84,18 +90,19 @@ async def analyze_excel(request: Request):
                 "cost_price": round(float(row['Net_Price']), 2),
                 "elasticity": elasticity,
                 "abc_class": str(row['abc_class']),
-                "doi": np.random.randint(10, 60) # Simulated DOI
+                "doi": np.random.randint(12, 45) # Simulated for the demo
             })
 
-        # --- THE COMBINED RESULT ---
+        # --- 5. ΣΥΝΕΝΩΣΗ ΟΛΩΝ ΤΩΝ ΔΕΔΟΜΕΝΩΝ ΣΤΟ JSON ---
         result = {
-            "items": items_for_free,        # Για τα δωρεάν charts
+            "items": items_legacy,          # Επαναφορά για το Basic Dashboard
             "category_macro": category_macro, # Για το PRO Bubble Chart
             "raw_data": raw_data_pro,       # Για το PRO Table & Planner
             "total_sales": int(total_sales),
             "status": "success"
         }
 
+        # Ενημέρωση Supabase
         supabase.table("projects").update({"analysis_json": result, "analysis_status": "completed"}).eq("id", project_id).execute()
         return {"status": "success"}
 
