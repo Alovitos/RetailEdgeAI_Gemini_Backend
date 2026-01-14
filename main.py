@@ -1,11 +1,12 @@
 import pandas as pd
 import json
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import io
 
 app = FastAPI()
 
+# Πλήρης άδεια CORS για να επικοινωνεί το Lovable χωρίς εμπόδια
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,15 +16,15 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"status": "Hedginq Backend is Running"}
+    return {"status": "Hedginq Backend is Online"}
 
 @app.post("/analyze")
 async def analyze_data(file: UploadFile = File(...)):
-    # Διαβάζουμε το αρχείο
+    # Ανάγνωση αρχείου
     contents = await file.read()
-    # Χρησιμοποιούμε io.BytesIO για να το διαβάσει η pandas
     df = pd.read_excel(io.BytesIO(contents))
     
+    # Mapping στυλών - Ενοποίηση παλιών και νέων (YA)
     column_mapping = {
         'Product Name': 'product_name',
         'Category': 'category',
@@ -41,44 +42,45 @@ async def analyze_data(file: UploadFile = File(...)):
     
     df = df.rename(columns=column_mapping)
     
-    # Defaults
+    # Διασφάλιση βασικών στηλών για να μη "σκάσει" το render
     required = ['value_sales', 'unit_sales', 'net_price', 'current_price']
     for col in required:
-        if col not in df.columns: df[col] = 0
+        if col not in df.columns:
+            df[col] = 0
             
-    if 'value_sales_ya' not in df.columns: df['value_sales_ya'] = None
-    if 'unit_sales_ya' not in df.columns: df['unit_sales_ya'] = None
-
+    # Προετοιμασία λίστας αποτελεσμάτων
     analysis_data = []
+    
     for _, row in df.iterrows():
         item = row.to_dict()
         
-        # Growth Logic
-        try:
-            val_ya = float(row['value_sales_ya'])
-            item['sales_growth'] = round(((float(row['value_sales']) - val_ya) / val_ya) * 100, 2) if val_ya > 0 else None
-        except: item['sales_growth'] = None
+        # Υπολογισμός Sales Growth % (μόνο αν υπάρχει η στήλη και έχει τιμή)
+        item['sales_growth'] = None
+        if 'value_sales_ya' in row and pd.notnull(row['value_sales_ya']) and float(row['value_sales_ya']) > 0:
+            item['sales_growth'] = round(((float(row['value_sales']) - float(row['value_sales_ya'])) / float(row['value_sales_ya'])) * 100, 2)
 
-        try:
-            vol_ya = float(row['unit_sales_ya'])
-            item['volume_growth'] = round(((float(row['unit_sales']) - vol_ya) / vol_ya) * 100, 2) if vol_ya > 0 else None
-        except: item['volume_growth'] = None
+        # Υπολογισμός Volume Growth %
+        item['volume_growth'] = None
+        if 'unit_sales_ya' in row and pd.notnull(row['unit_sales_ya']) and float(row['unit_sales_ya']) > 0:
+            item['volume_growth'] = round(((float(row['unit_sales']) - float(row['unit_sales_ya'])) / float(row['unit_sales_ya'])) * 100, 2)
         
-        # Margin Logic
+        # Κανονικοποίηση Margin (μετατροπή 0.2 σε 20)
         try:
             m = float(row['gm_percent'])
             item['gm_percent'] = m * 100 if m < 1 else m
-        except: item['gm_percent'] = 0
+        except:
+            item['gm_percent'] = 0
             
         analysis_data.append(item)
 
-    # Category Benchmarks
+    # Υπολογισμός Category Benchmarks για το Negotiation Hub
     cat_benchmarks = {}
-    for cat in df['category'].unique():
-        cat_df = df[df['category'] == cat]
-        rev = cat_df['value_sales'].sum()
-        cost = (cat_df['unit_sales'] * cat_df['net_price']).sum()
-        cat_benchmarks[str(cat)] = round(((rev - cost) / rev) * 100, 2) if rev > 0 else 0
+    if 'category' in df.columns:
+        for cat in df['category'].unique():
+            cat_df = df[df['category'] == cat]
+            rev = cat_df['value_sales'].sum()
+            cost = (cat_df['unit_sales'] * cat_df['net_price']).sum()
+            cat_benchmarks[str(cat)] = round(((rev - cost) / rev) * 100, 2) if rev > 0 else 0
 
     return {
         "products": analysis_data,
