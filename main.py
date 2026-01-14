@@ -26,8 +26,8 @@ async def analyze_excel(request: Request):
         df.columns = [str(c).strip() for c in df.columns]
 
         # --- 1. DYNAMIC MAPPING (Υποστήριξη για κάθε Excel) ---
-        id_col = next((c for c in df.columns if any(x in c.upper() for x in ["ID", "CODE", "ΚΩΔ"])), df.columns[0])
-        name_col = next((c for c in df.columns if any(x in c.upper() for x in ["DESC", "NAME", "ΠΕΡΙΓ"])), df.columns[1])
+        id_col = next((c for c in df.columns if any(x in c.upper() for x in ["SKU_ID", "CODE", "ΚΩΔ"])), df.columns[0])
+        name_col = next((c for c in df.columns if any(x in c.upper() for x in ["SKU_Description", "NAME", "ΠΕΡΙΓ"])), df.columns[1])
         brand_col = next((c for c in df.columns if "BRAND" in c.upper() or "ΜΑΡΚΑ" in c.upper()), "Brand")
         cat_col = next((c for c in df.columns if any(x in c.upper() for x in ["SEGMENT", "CATEGORY", "ΚΑΤΗΓ"])), "Segment")
 
@@ -38,7 +38,7 @@ async def analyze_excel(request: Request):
         df['Value Sales'] = pd.to_numeric(df["Value Sales"], errors='coerce').fillna(0)
         df['Unit Sales'] = pd.to_numeric(df["Unit Sales"], errors='coerce').fillna(0)
         df['Net_Price'] = pd.to_numeric(df["Net_Price"], errors='coerce').fillna(0)
-        df['Sales_Without_VAT'] = pd.to_numeric(df["Sales_Without_VAT"], errors='coerce').fillna(0)
+        df['Sales_Price_Without_VAT'] = pd.to_numeric(df["Sales_Price_Without_VAT"], errors='coerce').fillna(0)
         
         # --- 2. ABC ANALYSIS (Για το Freemium Dashboard) ---
         df = df.sort_values('Value Sales', ascending=False)
@@ -54,7 +54,7 @@ async def analyze_excel(request: Request):
                 "revenue": float(row['Value Sales']),
                 "units": int(row['Unit Sales']),
                 "abc_class": str(row['abc_class']),
-                "price": float(row['Sales_Without_VAT']),
+                "price": float(row['Sales_Price_Without_VAT']),
                 "brand": str(row[brand_col]),
                 "category": str(row[cat_col])
             })
@@ -62,9 +62,9 @@ async def analyze_excel(request: Request):
         # --- 4. DATA FOR EXECUTIVE RGM & PROMO PLANNER (New PRO Features) ---
         # Category Macro για το Bubble Chart
         category_macro = []
-        cat_group = df.groupby(cat_col).agg({'Value Sales': 'sum', 'Unit Sales': 'sum', 'Sales_Without_VAT': 'mean', 'Net_Price': 'mean'}).reset_index()
+        cat_group = df.groupby(cat_col).agg({'Value Sales': 'sum', 'Unit Sales': 'sum', 'Sales_Price_Without_VAT': 'mean', 'Net_Price': 'mean'}).reset_index()
         for _, r in cat_group.iterrows():
-            margin_pct = ((r['Sales_Without_VAT'] - r['Net_Price']) / r['Sales_Without_VAT'] * 100) if r['Sales_Without_VAT'] > 0 else 0
+            margin_pct = ((r['Sales_Price_Without_VAT'] - r['Net_Price']) / r['Sales_Price_Without_VAT'] * 100) if r['Sales_Price_Without_VAT'] > 0 else 0
             category_macro.append({
                 "category": str(r[cat_col]),
                 "sales": int(r['Value Sales']),
@@ -86,7 +86,7 @@ async def analyze_excel(request: Request):
                 "units": int(row['Unit Sales']),
                 "sales": float(row['Value Sales']),
                 "gm_percent": round(float(margin_pct), 1),
-                "current_price": round(float(row['Sales_Without_VAT']), 2),
+                "current_price": round(float(row['Sales_Price_Without_VAT']), 2),
                 "cost_price": round(float(row['Net_Price']), 2),
                 "elasticity": elasticity,
                 "abc_class": str(row['abc_class']),
