@@ -24,93 +24,78 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- 1. DYNAMIC MAPPING ---
+        # --- DYNAMIC MAPPING ---
         id_col = next((c for c in df.columns if any(x in c.upper() for x in ["ID", "CODE", "ΚΩΔ"])), df.columns[0])
         name_col = next((c for c in df.columns if any(x in c.upper() for x in ["DESC", "NAME", "ΠΕΡΙΓ"])), df.columns[1])
         brand_col = next((c for c in df.columns if "BRAND" in c.upper() or "ΜΑΡΚΑ" in c.upper()), "Brand")
         cat_col = next((c for c in df.columns if any(x in c.upper() for x in ["SEGMENT", "CATEGORY", "ΚΑΤΗΓ"])), "Segment")
-        
-        # Προσθήκη στήλης Brand αν λείπει για να μην κρασάρει
-        if brand_col not in df.columns:
-            df[brand_col] = "Generic"
 
-        # --- 2. CALCULATIONS ---
-        df['sales'] = pd.to_numeric(df["Value Sales"], errors='coerce').fillna(0)
-        df['units'] = pd.to_numeric(df["Unit Sales"], errors='coerce').fillna(0)
-        df['cost'] = pd.to_numeric(df["Net_Price"], errors='coerce').fillna(0)
-        df['price'] = pd.to_numeric(df["Sales_Without_VAT"], errors='coerce').fillna(0)
-        df['margin_euro'] = df['price'] - df['cost']
-        df['gm_percent'] = np.where(df['price'] > 0, (df['margin_euro'] / df['price']) * 100, 0)
+        # Basic Conversions
+        df['Value Sales'] = pd.to_numeric(df["Value Sales"], errors='coerce').fillna(0)
+        df['Unit Sales'] = pd.to_numeric(df["Unit Sales"], errors='coerce').fillna(0)
+        df['Net_Price'] = pd.to_numeric(df["Net_Price"], errors='coerce').fillna(0)
+        df['Sales_Without_VAT'] = pd.to_numeric(df["Sales_Without_VAT"], errors='coerce').fillna(0)
         
-        # ABC Analysis
-        df = df.sort_values('sales', ascending=False)
-        total_sales_sum = df['sales'].sum()
-        df['cum_perc'] = (df['sales'].cumsum() / (total_sales_sum + 0.01)) * 100
-        df['abc'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
+        # ABC Analysis (Απαραίτητο για τα δωρεάν dashboards)
+        df = df.sort_values('Value Sales', ascending=False)
+        total_sales = df['Value Sales'].sum()
+        df['cum_perc'] = (df['Value Sales'].cumsum() / (total_sales + 0.01)) * 100
+        df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
 
-        # DOI Simulation for Executive Suite
-        df['calculated_doi'] = np.where(df['abc'] == 'A', np.random.randint(8, 25, size=len(df)), np.random.randint(30, 95, size=len(df)))
+        # --- DATA FOR FREE DASHBOARDS (Legacy Support) ---
+        # Αυτά τα πεδία ψάχνει το "Home" και το "Dashboard"
+        items_for_free = []
+        for _, row in df.iterrows():
+            items_for_free.append({
+                "name": str(row[name_col]),
+                "revenue": float(row['Value Sales']),
+                "units": int(row['Unit Sales']),
+                "abc_class": str(row['abc_class']),
+                "price": float(row['Sales_Without_VAT'])
+            })
 
-        # --- 3. CATEGORY MACRO (For Level 1 - Bubble Chart) ---
-        cat_group = df.groupby(cat_col).agg({
-            'sales': 'sum',
-            'units': 'sum',
-            'gm_percent': 'mean'
-        }).reset_index()
-        
+        # --- DATA FOR EXECUTIVE RGM & PROMO PLANNER (PRO Features) ---
         category_macro = []
+        cat_group = df.groupby(cat_col).agg({'Value Sales': 'sum', 'Unit Sales': 'sum', 'Sales_Without_VAT': 'mean', 'Net_Price': 'mean'}).reset_index()
         for _, r in cat_group.iterrows():
+            margin_pct = ((r['Sales_Without_VAT'] - r['Net_Price']) / r['Sales_Without_VAT'] * 100) if r['Sales_Without_VAT'] > 0 else 0
             category_macro.append({
                 "category": str(r[cat_col]),
-                "sales": int(r['sales']),
-                "units": int(r['units']),
-                "avg_margin": round(float(r['gm_percent']), 1)
+                "sales": int(r['Value Sales']),
+                "units": int(r['Unit Sales']),
+                "avg_margin": round(float(margin_pct), 1)
             })
 
-        # --- 4. SKU & BRAND DATA (For Level 2 Table & Promo Planner) ---
-        raw_data = []
+        raw_data_pro = []
         for _, row in df.iterrows():
-            margin = float(row['gm_percent'])
-            abc_val = str(row['abc'])
-            category_name = str(row[cat_col])
+            margin_pct = ((row['Sales_Without_VAT'] - row['Net_Price']) / row['Sales_Without_VAT'] * 100) if row['Sales_Without_VAT'] > 0 else 0
+            # Elasticity Logic
+            elasticity = -2.4 if row['abc_class'] == 'A' else -1.6
             
-            # Recommendation Logic
-            if margin > 22 and abc_val == 'A': rec = "Expand"
-            elif margin < 10 or abc_val == 'C': rec = "Under Review"
-            else: rec = "Maintain"
-
-            # Elasticity Logic for Promo Planner
-            elasticity = -2.4 if abc_val == 'A' else -1.6
-            if any(x in category_name.upper() for x in ["ICE", "SOFT", "BEER", "SNACK"]):
-                elasticity -= 0.7 # Πιο ευαίσθητα προϊόντα
-            
-            raw_data.append({
-                "sku": str(row[id_col]),
+            raw_data_pro.append({
                 "sku_id": str(row[id_col]),
                 "description": str(row[name_col]),
-                "category": category_name,
-                "brand": str(row[brand_col]),
-                "units": int(row['units']),
-                "sales": int(row['sales']),
-                "gm_percent": round(margin, 1),
-                "doi": round(float(row['calculated_doi']), 1),
-                "recommendation": rec,
-                "smart_tag": rec,
-                "current_price": round(float(row['price']), 2),
-                "cost_price": round(float(row['cost']), 2),
+                "category": str(row[cat_col]),
+                "brand": str(row[brand_col]) if brand_col in df.columns else "Generic",
+                "units": int(row['Unit Sales']),
+                "sales": float(row['Value Sales']),
+                "gm_percent": round(float(margin_pct), 1),
+                "current_price": round(float(row['Sales_Without_VAT']), 2),
+                "cost_price": round(float(row['Net_Price']), 2),
                 "elasticity": elasticity,
-                "abc_class": abc_val
+                "abc_class": str(row['abc_class']),
+                "doi": np.random.randint(10, 60) # Simulated DOI
             })
 
-        # --- 5. FINAL RESPONSE ---
+        # --- THE COMBINED RESULT ---
         result = {
-            "total_sales": int(total_sales_sum),
-            "category_macro": category_macro,
-            "raw_data": raw_data,
+            "items": items_for_free,        # Για τα δωρεάν charts
+            "category_macro": category_macro, # Για το PRO Bubble Chart
+            "raw_data": raw_data_pro,       # Για το PRO Table & Planner
+            "total_sales": int(total_sales),
             "status": "success"
         }
 
-        # Update Supabase
         supabase.table("projects").update({"analysis_json": result, "analysis_status": "completed"}).eq("id", project_id).execute()
         return {"status": "success"}
 
