@@ -23,59 +23,51 @@ async def analyze_excel(request: Request):
         response = requests.get(file_url, timeout=60)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         
-        # FIX: Διασφάλιση ότι τα ονόματα των στηλών είναι strings πριν το strip
+        # Καθαρισμός στηλών - Διασφάλιση string για το strip
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Mapping στηλών βάσει του Excel σου
+        # Mapping (Βάσει του Excel σου)
         mapping = {
-            "id": "SKU_ID",
-            "desc": "SKU_Description",
-            "brand": "Brand",
-            "cat": "Category",
-            "sales": "Value Sales",
-            "units": "Unit Sales",
-            "price": "Sales_Price_Without_VAT",
-            "net": "Net_Price"
+            "id": "SKU_ID", "desc": "SKU_Description", "brand": "Brand", "cat": "Category",
+            "sales": "Value Sales", "units": "Unit Sales", "price": "Sales_Price_Without_VAT", "net": "Net_Price"
         }
 
         # Μετατροπή σε αριθμούς
         for col in [mapping["sales"], mapping["units"], mapping["price"], mapping["net"]]:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('€', '').str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
-        # Υπολογισμός Margin
+        # Υπολογισμός Margin & ABC
         df['gm_percent'] = np.where(df[mapping["price"]] > 0, ((df[mapping["price"]] - df[mapping["net"]]) / df[mapping["price"]]) * 100, 0)
-        
-        # ABC Analysis
         df = df.sort_values(mapping["sales"], ascending=False)
         total_sales_sum = df[mapping["sales"]].sum()
         df['cum_perc'] = (df[mapping["sales"]].cumsum() / (total_sales_sum + 0.01)) * 100
         df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
 
+        # Κατασκευή του ενιαίου Dataset
         all_items = []
         for _, row in df.iterrows():
             margin = float(row['gm_percent'])
             abc = str(row['abc_class'])
             cat = str(row[mapping["cat"]]).upper()
             
-            # Smart Tag Logic (Fix για image_26b47b)
+            # Smart Tag Logic
             if margin > 25 and abc == 'A': tag = "Star Product"
             elif margin < 15 and abc == 'A': tag = "Volume Driver"
-            elif margin > 30: tag = "Premium"
-            elif margin < 10: tag = "Underperform"
+            elif margin < 10: tag = "Kill or Fix"
             else: tag = "Maintain"
 
-            # Suggested Elasticity Logic (Fix για image_2661c3)
+            # Suggested Elasticity
             elasticity = -1.8
             if any(x in cat for x in ["SOFT", "BEER", "BEV"]): elasticity = -2.4
-            elif any(x in cat for x in ["SNACK", "CHIPS"]): elasticity = -2.1
-            elif any(x in cat for x in ["DAIRY", "FAGE"]): elasticity = -1.6
             
-            all_items.append({
+            item_data = {
                 "sku_id": str(row[mapping["id"]]),
+                "name": str(row[mapping["desc"]]),
                 "description": str(row[mapping["desc"]]),
                 "category": str(row[mapping["cat"]]),
                 "brand": str(row[mapping["brand"]]),
                 "revenue": float(row[mapping["sales"]]),
+                "sales": float(row[mapping["sales"]]),
                 "units": int(row[mapping["units"]]),
                 "price": round(float(row[mapping["price"]]), 2),
                 "net_price": round(float(row[mapping["net"]]), 2),
@@ -83,20 +75,31 @@ async def analyze_excel(request: Request):
                 "abc_class": abc,
                 "smart_tag": tag,
                 "elasticity": elasticity
-            })
+            }
+            all_items.append(item_data)
 
-        # Category Macro για το Donut Chart (Fix για image_26612c)
-        cat_group = df.groupby(mapping["cat"]).agg({mapping["sales"]: 'sum'}).reset_index()
+        # Category Macro (Για Donut & Bubble Chart)
+        cat_group = df.groupby(mapping["cat"]).agg({mapping["sales"]: 'sum', 'gm_percent': 'mean'}).reset_index()
         category_macro = []
         for _, r in cat_group.iterrows():
             perc = (r[mapping["sales"]] / total_sales_sum) * 100
             category_macro.append({
                 "category": str(r[mapping["cat"]]),
                 "value": round(float(r[mapping["sales"]]), 2),
+                "sales": round(float(r[mapping["sales"]]), 2),
+                "avg_margin": round(float(r['gm_percent']), 1),
                 "label": f"{r[mapping['cat']]} ({perc:.1f}%)"
             })
 
-        result = {"items": all_items, "raw_data": all_items, "category_macro": category_macro, "status": "success"}
+        # ΤΕΛΙΚΟ JSON (Universal)
+        result = {
+            "items": all_items,             # Για Freemium (ABC, Top 10)
+            "raw_data": all_items,          # Για PRO (Table, Promo)
+            "category_macro": category_macro, # Για Charts
+            "total_sales": int(total_sales_sum),
+            "status": "success"
+        }
+
         supabase.table("projects").update({"analysis_json": result, "analysis_status": "completed"}).eq("id", project_id).execute()
         return {"status": "success"}
     except Exception as e:
