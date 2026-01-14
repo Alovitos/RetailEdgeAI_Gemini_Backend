@@ -1,6 +1,6 @@
 import pandas as pd
 import json
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import io
 
@@ -17,13 +17,13 @@ app.add_middleware(
 async def root():
     return {"status": "Hedginq Backend is Running"}
 
-# ΕΠΙΣΤΡΟΦΗ ΣΤΟ ΣΩΣΤΟ ENDPOINT NAME ΓΙΑ ΝΑ ΜΗΝ ΕΧΟΥΜΕ 404
 @app.post("/analyze")
 async def analyze_data(file: UploadFile = File(...)):
+    # Διαβάζουμε το αρχείο
     contents = await file.read()
+    # Χρησιμοποιούμε io.BytesIO για να το διαβάσει η pandas
     df = pd.read_excel(io.BytesIO(contents))
     
-    # Mapping στυλών - Διατήρηση όλων των παλιών + YA
     column_mapping = {
         'Product Name': 'product_name',
         'Category': 'category',
@@ -41,12 +41,11 @@ async def analyze_data(file: UploadFile = File(...)):
     
     df = df.rename(columns=column_mapping)
     
-    # Defaults για αποφυγή errors
+    # Defaults
     required = ['value_sales', 'unit_sales', 'net_price', 'current_price']
     for col in required:
         if col not in df.columns: df[col] = 0
             
-    # Προετοιμασία YA στηλών
     if 'value_sales_ya' not in df.columns: df['value_sales_ya'] = None
     if 'unit_sales_ya' not in df.columns: df['unit_sales_ya'] = None
 
@@ -54,7 +53,7 @@ async def analyze_data(file: UploadFile = File(...)):
     for _, row in df.iterrows():
         item = row.to_dict()
         
-        # Υπολογισμός Growth (Sales & Volume)
+        # Growth Logic
         try:
             val_ya = float(row['value_sales_ya'])
             item['sales_growth'] = round(((float(row['value_sales']) - val_ya) / val_ya) * 100, 2) if val_ya > 0 else None
@@ -65,7 +64,7 @@ async def analyze_data(file: UploadFile = File(...)):
             item['volume_growth'] = round(((float(row['unit_sales']) - vol_ya) / vol_ya) * 100, 2) if vol_ya > 0 else None
         except: item['volume_growth'] = None
         
-        # Margin normalization
+        # Margin Logic
         try:
             m = float(row['gm_percent'])
             item['gm_percent'] = m * 100 if m < 1 else m
@@ -73,7 +72,7 @@ async def analyze_data(file: UploadFile = File(...)):
             
         analysis_data.append(item)
 
-    # Category Benchmarks για το Negotiation Hub
+    # Category Benchmarks
     cat_benchmarks = {}
     for cat in df['category'].unique():
         cat_df = df[df['category'] == cat]
