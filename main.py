@@ -24,17 +24,14 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Mapping (Αυστηρά βάσει του Excel σου)
         mapping = {
             "id": "SKU_ID", "desc": "SKU_Description", "brand": "Brand", "cat": "Category",
             "sales": "Value Sales", "units": "Unit Sales", "price": "Sales_Price_Without_VAT", "net": "Net_Price"
         }
 
-        # Μετατροπή σε αριθμούς
         for col in [mapping["sales"], mapping["units"], mapping["price"], mapping["net"]]:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('€', '').str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
-        # GM% & ABC Analysis
         df['gm_percent'] = np.where(df[mapping["price"]] > 0, ((df[mapping["price"]] - df[mapping["net"]]) / df[mapping["price"]]) * 100, 0)
         df = df.sort_values(mapping["sales"], ascending=False)
         total_sales_sum = df[mapping["sales"]].sum()
@@ -43,49 +40,38 @@ async def analyze_excel(request: Request):
 
         all_items = []
         for _, row in df.iterrows():
-            margin = float(row['gm_percent'])
-            abc = str(row['abc_class'])
-            cat = str(row[mapping["cat"]])
+            # ΚΑΘΑΡΟ ΟΝΟΜΑ ΚΑΤΗΓΟΡΙΑΣ (Χωρίς ποσοστά)
+            clean_cat = str(row[mapping["cat"]]).strip()
             
-            # Διπλά κλειδιά για να μην "χάνεται" το Lovable σε καμία σελίδα
             item_data = {
                 "sku_id": str(row[mapping["id"]]),
                 "name": str(row[mapping["desc"]]),
                 "description": str(row[mapping["desc"]]),
-                "category": cat,
+                "category": clean_cat,
                 "brand": str(row[mapping["brand"]]),
                 "revenue": float(row[mapping["sales"]]),
                 "sales": float(row[mapping["sales"]]),
                 "units": int(row[mapping["units"]]),
                 "price": round(float(row[mapping["price"]]), 2),
-                "current_price": round(float(row[mapping["price"]]), 2),
                 "net_price": round(float(row[mapping["net"]]), 2),
-                "gm_percent": round(margin, 1),
-                "abc_class": abc,
-                "smart_tag": "Star Product" if margin > 25 and abc == 'A' else "Maintain",
-                "elasticity": -2.4 if "BEV" in cat.upper() else -1.8
+                "gm_percent": round(float(row['gm_percent']), 1),
+                "abc_class": str(row['abc_class']),
+                "smart_tag": "Star Product" if float(row['gm_percent']) > 25 else "Maintain",
+                "elasticity": -1.8
             }
             all_items.append(item_data)
 
-        # Macro data για τα γραφήματα
-        cat_group = df.groupby(mapping["cat"]).agg({mapping["sales"]: 'sum', 'gm_percent': 'mean'}).reset_index()
+        # Category Macro - Εδώ στέλνουμε το καθαρό όνομα για το φίλτρο
+        cat_group = df.groupby(mapping["cat"]).agg({mapping["sales"]: 'sum'}).reset_index()
         category_macro = []
         for _, r in cat_group.iterrows():
             category_macro.append({
-                "category": str(r[mapping["cat"]]),
+                "category": str(r[mapping["cat"]]).strip(),
                 "sales": round(float(r[mapping["sales"]]), 2),
-                "avg_margin": round(float(r['gm_percent']), 1),
-                "label": f"{r[mapping['cat']]} ({ (r[mapping['sales']]/total_sales_sum)*100 :.1f}%)"
+                "label": str(r[mapping["cat"]]).strip() # ΜΟΝΟ το όνομα, το % θα το βάλει το UI
             })
 
-        result = {
-            "items": all_items, 
-            "raw_data": all_items, 
-            "category_macro": category_macro,
-            "total_sales": int(total_sales_sum),
-            "status": "success"
-        }
-
+        result = {"items": all_items, "raw_data": all_items, "category_macro": category_macro, "status": "success"}
         supabase.table("projects").update({"analysis_json": result, "analysis_status": "completed"}).eq("id", project_id).execute()
         return {"status": "success"}
     except Exception as e:
