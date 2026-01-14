@@ -22,11 +22,9 @@ async def analyze_excel(request: Request):
 
         response = requests.get(file_url, timeout=60)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
-        
-        # Καθαρισμός στηλών - Διασφάλιση string
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Mapping βάσει του Excel σου (image_2504c7.png)
+        # Mapping (Αυστηρά βάσει του Excel σου)
         mapping = {
             "id": "SKU_ID", "desc": "SKU_Description", "brand": "Brand", "cat": "Category",
             "sales": "Value Sales", "units": "Unit Sales", "price": "Sales_Price_Without_VAT", "net": "Net_Price"
@@ -36,7 +34,7 @@ async def analyze_excel(request: Request):
         for col in [mapping["sales"], mapping["units"], mapping["price"], mapping["net"]]:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('€', '').str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
-        # Υπολογισμοί
+        # GM% & ABC Analysis
         df['gm_percent'] = np.where(df[mapping["price"]] > 0, ((df[mapping["price"]] - df[mapping["net"]]) / df[mapping["price"]]) * 100, 0)
         df = df.sort_values(mapping["sales"], ascending=False)
         total_sales_sum = df[mapping["sales"]].sum()
@@ -49,17 +47,7 @@ async def analyze_excel(request: Request):
             abc = str(row['abc_class'])
             cat = str(row[mapping["cat"]])
             
-            # Smart Tag Logic
-            if margin > 25 and abc == 'A': tag = "Star Product"
-            elif margin < 15 and abc == 'A': tag = "Volume Driver"
-            elif margin < 10: tag = "Kill or Fix"
-            else: tag = "Maintain"
-
-            # Suggested Elasticity
-            elasticity = -1.8
-            if any(x in cat.upper() for x in ["SOFT", "BEER", "BEV"]): elasticity = -2.4
-            
-            # Δημιουργία αντικειμένου με όλα τα δυνατά ονόματα για να μη χάνεται το Lovable
+            # Διπλά κλειδιά για να μην "χάνεται" το Lovable σε καμία σελίδα
             item_data = {
                 "sku_id": str(row[mapping["id"]]),
                 "name": str(row[mapping["desc"]]),
@@ -74,22 +62,20 @@ async def analyze_excel(request: Request):
                 "net_price": round(float(row[mapping["net"]]), 2),
                 "gm_percent": round(margin, 1),
                 "abc_class": abc,
-                "smart_tag": tag,
-                "elasticity": elasticity
+                "smart_tag": "Star Product" if margin > 25 and abc == 'A' else "Maintain",
+                "elasticity": -2.4 if "BEV" in cat.upper() else -1.8
             }
             all_items.append(item_data)
 
-        # Category Macro
+        # Macro data για τα γραφήματα
         cat_group = df.groupby(mapping["cat"]).agg({mapping["sales"]: 'sum', 'gm_percent': 'mean'}).reset_index()
         category_macro = []
         for _, r in cat_group.iterrows():
-            perc = (r[mapping["sales"]] / total_sales_sum) * 100
             category_macro.append({
                 "category": str(r[mapping["cat"]]),
-                "value": round(float(r[mapping["sales"]]), 2),
                 "sales": round(float(r[mapping["sales"]]), 2),
                 "avg_margin": round(float(r['gm_percent']), 1),
-                "label": f"{r[mapping['cat']]} ({perc:.1f}%)"
+                "label": f"{r[mapping['cat']]} ({ (r[mapping['sales']]/total_sales_sum)*100 :.1f}%)"
             })
 
         result = {
