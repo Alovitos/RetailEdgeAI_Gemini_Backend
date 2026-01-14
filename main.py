@@ -23,10 +23,10 @@ async def analyze_excel(request: Request):
         response = requests.get(file_url, timeout=60)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         
-        # Καθαρισμός στηλών - Διασφάλιση string για το strip
+        # Καθαρισμός στηλών - Διασφάλιση string
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Mapping (Βάσει του Excel σου)
+        # Mapping βάσει του Excel σου (image_2504c7.png)
         mapping = {
             "id": "SKU_ID", "desc": "SKU_Description", "brand": "Brand", "cat": "Category",
             "sales": "Value Sales", "units": "Unit Sales", "price": "Sales_Price_Without_VAT", "net": "Net_Price"
@@ -36,19 +36,18 @@ async def analyze_excel(request: Request):
         for col in [mapping["sales"], mapping["units"], mapping["price"], mapping["net"]]:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('€', '').str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
-        # Υπολογισμός Margin & ABC
+        # Υπολογισμοί
         df['gm_percent'] = np.where(df[mapping["price"]] > 0, ((df[mapping["price"]] - df[mapping["net"]]) / df[mapping["price"]]) * 100, 0)
         df = df.sort_values(mapping["sales"], ascending=False)
         total_sales_sum = df[mapping["sales"]].sum()
         df['cum_perc'] = (df[mapping["sales"]].cumsum() / (total_sales_sum + 0.01)) * 100
         df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
 
-        # Κατασκευή του ενιαίου Dataset
         all_items = []
         for _, row in df.iterrows():
             margin = float(row['gm_percent'])
             abc = str(row['abc_class'])
-            cat = str(row[mapping["cat"]]).upper()
+            cat = str(row[mapping["cat"]])
             
             # Smart Tag Logic
             if margin > 25 and abc == 'A': tag = "Star Product"
@@ -58,18 +57,20 @@ async def analyze_excel(request: Request):
 
             # Suggested Elasticity
             elasticity = -1.8
-            if any(x in cat for x in ["SOFT", "BEER", "BEV"]): elasticity = -2.4
+            if any(x in cat.upper() for x in ["SOFT", "BEER", "BEV"]): elasticity = -2.4
             
+            # Δημιουργία αντικειμένου με όλα τα δυνατά ονόματα για να μη χάνεται το Lovable
             item_data = {
                 "sku_id": str(row[mapping["id"]]),
                 "name": str(row[mapping["desc"]]),
                 "description": str(row[mapping["desc"]]),
-                "category": str(row[mapping["cat"]]),
+                "category": cat,
                 "brand": str(row[mapping["brand"]]),
                 "revenue": float(row[mapping["sales"]]),
                 "sales": float(row[mapping["sales"]]),
                 "units": int(row[mapping["units"]]),
                 "price": round(float(row[mapping["price"]]), 2),
+                "current_price": round(float(row[mapping["price"]]), 2),
                 "net_price": round(float(row[mapping["net"]]), 2),
                 "gm_percent": round(margin, 1),
                 "abc_class": abc,
@@ -78,7 +79,7 @@ async def analyze_excel(request: Request):
             }
             all_items.append(item_data)
 
-        # Category Macro (Για Donut & Bubble Chart)
+        # Category Macro
         cat_group = df.groupby(mapping["cat"]).agg({mapping["sales"]: 'sum', 'gm_percent': 'mean'}).reset_index()
         category_macro = []
         for _, r in cat_group.iterrows():
@@ -91,11 +92,10 @@ async def analyze_excel(request: Request):
                 "label": f"{r[mapping['cat']]} ({perc:.1f}%)"
             })
 
-        # ΤΕΛΙΚΟ JSON (Universal)
         result = {
-            "items": all_items,             # Για Freemium (ABC, Top 10)
-            "raw_data": all_items,          # Για PRO (Table, Promo)
-            "category_macro": category_macro, # Για Charts
+            "items": all_items, 
+            "raw_data": all_items, 
+            "category_macro": category_macro,
             "total_sales": int(total_sales_sum),
             "status": "success"
         }
