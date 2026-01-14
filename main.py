@@ -12,12 +12,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
-def get_smart_elasticity(category_name, product_name):
-    text = (str(category_name) + " " + str(product_name)).lower()
-    if any(x in text for x in ['baby', 'diaper', 'pampers', 'nappy', 'πάνες']): return -0.6
-    if any(x in text for x in ['ice cream', 'snack', 'chips', 'lays', 'παγωτό']): return -3.2
-    return -1.8
-
 @app.post("/analyze")
 async def analyze_excel(request: Request):
     project_id = None
@@ -30,77 +24,68 @@ async def analyze_excel(request: Request):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # --- MAPPING ---
-        id_col = "SKU_ID" if "SKU_ID" in df.columns else (df.columns[0] if len(df.columns) > 0 else "ID")
-        name_col = "SKU_Description"
-        sales_val_col = "Value Sales"
-        unit_sales_col = "Unit Sales"
-        retail_no_vat = "Sales_Without_VAT"
-        cost_net = "Net_Price"
-        segment_col = "Segment"
-        
-        # DOI / Stock Logic
-        stock_col = "Stock" if "Stock" in df.columns else None
-        doi_col = "DOI" if "DOI" in df.columns else None
+        # --- DYNAMIC MAPPING ---
+        # Ψάχνει για SKU ID ή παίρνει την πρώτη στήλη αν δεν το βρει
+        id_col = next((c for c in df.columns if "ID" in c.upper() or "CODE" in c.upper()), df.columns[0])
+        name_col = next((c for c in df.columns if "DESC" in c.upper() or "NAME" in c.upper()), df.columns[1])
+        sales_val_col = next((c for c in df.columns if "VALUE" in c.upper() or "SALES" in c.upper() and "UNIT" not in c.upper()), "Value Sales")
+        unit_sales_col = next((c for c in df.columns if "UNIT" in c.upper()), "Unit Sales")
+        segment_col = next((c for c in df.columns if "SEGMENT" in c.upper() or "CATEGORY" in c.upper()), "Segment")
+        cost_col = next((c for c in df.columns if "COST" in c.upper() or "NET" in c.upper()), "Net_Price")
+        price_no_vat_col = next((c for c in df.columns if "WITHOUT" in c.upper() or "RETAIL" in c.upper()), "Sales_Without_VAT")
 
-        # Μετατροπές
+        # Μετατροπές σε νούμερα
         df['sales_total'] = pd.to_numeric(df[sales_val_col], errors='coerce').fillna(0)
         df['units_total'] = pd.to_numeric(df[unit_sales_col], errors='coerce').fillna(0)
-        df['price_no_vat'] = pd.to_numeric(df[retail_no_vat], errors='coerce').fillna(0)
-        df['cost_net'] = pd.to_numeric(df[cost_net], errors='coerce').fillna(0)
+        df['cost_net'] = pd.to_numeric(df[cost_col], errors='coerce').fillna(0)
+        df['price_no_vat'] = pd.to_numeric(df[price_no_vat_col], errors='coerce').fillna(0)
+        
+        # Υπολογισμός Margin %
         df['gm_percent'] = np.where(df['price_no_vat'] > 0, ((df['price_no_vat'] - df['cost_net']) / df['price_no_vat']) * 100, 0)
         
-        if stock_col:
-            df['calculated_doi'] = np.where(df['units_total'] > 0, (pd.to_numeric(df[stock_col], errors='coerce').fillna(0) / (df['units_total'] / 30)), 999)
+        # Υπολογισμός DOI (Simulation αν δεν υπάρχει Stock)
+        if "Stock" in df.columns:
+            df['calculated_doi'] = np.where(df['units_total'] > 0, (pd.to_numeric(df['Stock'], errors='coerce').fillna(0) / (df['units_total'] / 30)), 999)
         else:
-            df['calculated_doi'] = pd.to_numeric(df[doi_col], errors='coerce').fillna(0) if doi_col else np.random.randint(15, 85, size=len(df))
+            df['calculated_doi'] = np.random.randint(15, 85, size=len(df))
 
-        # ABC Analysis
-        df = df.sort_values('sales_total', ascending=False)
-        total_sales_sum = float(df['sales_total'].sum())
-        df['cum_perc'] = (df['sales_total'].cumsum() / total_sales_sum) * 100 if total_sales_sum > 0 else 0
-        df['abc_class'] = pd.cut(df['cum_perc'], bins=[0, 70, 90, 100.01], labels=['A', 'B', 'C']).fillna('C')
-
-        # --- CATEGORY MACRO (Level 1) ---
+        # --- CATEGORY MACRO DATA ---
         cat_group = df.groupby(segment_col).agg({
             'sales_total': 'sum',
             'units_total': 'sum',
-            'gm_percent': 'mean',
-            'abc_class': lambda x: (x == 'A').sum() # Πόσα A-Class SKUs έχει
+            'gm_percent': 'mean'
         }).reset_index()
         
         category_macro = []
         for _, r in cat_group.iterrows():
             category_macro.append({
-                "category": r[segment_col],
+                "category": str(r[segment_col]),
                 "sales": int(r['sales_total']),
                 "units": int(r['units_total']),
-                "avg_margin": round(float(r['gm_percent']), 1),
-                "star_skus": int(r['abc_class'])
+                "avg_margin": round(float(r['gm_percent']), 1)
             })
 
-        # --- SKU DATA (Level 2) ---
+        # --- SKU RAW DATA ---
         raw_data = []
         for _, row in df.iterrows():
-            # Recommendation Logic
             rec = "Maintain"
             if row['gm_percent'] > 25 and row['calculated_doi'] < 30: rec = "Stars"
             elif row['gm_percent'] < 12 and row['calculated_doi'] > 60: rec = "Under Review"
 
             raw_data.append({
                 "sku_id": str(row[id_col]),
-                "product_name": str(row[name_col]),
+                "description": str(row[name_col]),
                 "category": str(row[segment_col]),
                 "units": int(row['units_total']),
                 "sales": int(row['sales_total']),
                 "gm_percent": round(float(row['gm_percent']), 1),
                 "doi": round(float(row['calculated_doi']), 1),
-                "abc_class": str(row['abc_class']),
                 "recommendation": rec
             })
 
         result = {
-            "total_sales": int(total_sales_sum),
+            "total_sales": int(df['sales_total'].sum()),
+            "total_units": int(df['units_total'].sum()),
             "category_macro": category_macro,
             "raw_data": raw_data,
             "status": "success"
