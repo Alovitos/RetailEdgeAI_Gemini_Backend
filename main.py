@@ -2,13 +2,10 @@ import pandas as pd
 import json
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, List, Any
 import io
 
-# ΑΠΑΡΑΙΤΗΤΟ ΓΙΑ ΤΟ RENDER
 app = FastAPI()
 
-# Επιτρέπουμε στο Lovable να μιλάει με το Backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,13 +17,13 @@ app.add_middleware(
 async def root():
     return {"status": "Hedginq Backend is Running"}
 
-@app.post("/process")
-async def process_excel(file: UploadFile = File(...)):
-    # Διάβασμα του αρχείου από τη μνήμη
+# ΕΠΙΣΤΡΟΦΗ ΣΤΟ ΣΩΣΤΟ ENDPOINT NAME ΓΙΑ ΝΑ ΜΗΝ ΕΧΟΥΜΕ 404
+@app.post("/analyze")
+async def analyze_data(file: UploadFile = File(...)):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents))
     
-    # Mapping στυλών - Με τις νέες YA στήλες
+    # Mapping στυλών - Διατήρηση όλων των παλιών + YA
     column_mapping = {
         'Product Name': 'product_name',
         'Category': 'category',
@@ -44,39 +41,35 @@ async def process_excel(file: UploadFile = File(...)):
     
     df = df.rename(columns=column_mapping)
     
-    # Fill defaults για να μη σκάει τίποτα
-    required_columns = ['value_sales', 'unit_sales', 'net_price', 'current_price']
-    for col in required_columns:
-        if col not in df.columns:
-            df[col] = 0
+    # Defaults για αποφυγή errors
+    required = ['value_sales', 'unit_sales', 'net_price', 'current_price']
+    for col in required:
+        if col not in df.columns: df[col] = 0
             
-    if 'value_sales_ya' not in df.columns:
-        df['value_sales_ya'] = None
-    if 'unit_sales_ya' not in df.columns:
-        df['unit_sales_ya'] = None
-
-    def calculate_growth(current, ya):
-        try:
-            if ya and float(ya) > 0:
-                return round(((float(current) - float(ya)) / float(ya)) * 100, 2)
-        except:
-            pass
-        return None
+    # Προετοιμασία YA στηλών
+    if 'value_sales_ya' not in df.columns: df['value_sales_ya'] = None
+    if 'unit_sales_ya' not in df.columns: df['unit_sales_ya'] = None
 
     analysis_data = []
     for _, row in df.iterrows():
         item = row.to_dict()
         
-        # Growth calculations
-        item['sales_growth'] = calculate_growth(row['value_sales'], row['value_sales_ya'])
-        item['volume_growth'] = calculate_growth(row['unit_sales'], row['unit_sales_ya'])
+        # Υπολογισμός Growth (Sales & Volume)
+        try:
+            val_ya = float(row['value_sales_ya'])
+            item['sales_growth'] = round(((float(row['value_sales']) - val_ya) / val_ya) * 100, 2) if val_ya > 0 else None
+        except: item['sales_growth'] = None
+
+        try:
+            vol_ya = float(row['unit_sales_ya'])
+            item['volume_growth'] = round(((float(row['unit_sales']) - vol_ya) / vol_ya) * 100, 2) if vol_ya > 0 else None
+        except: item['volume_growth'] = None
         
         # Margin normalization
         try:
-            val = float(row['gm_percent'])
-            item['gm_percent'] = val * 100 if val < 1 else val
-        except:
-            item['gm_percent'] = 0
+            m = float(row['gm_percent'])
+            item['gm_percent'] = m * 100 if m < 1 else m
+        except: item['gm_percent'] = 0
             
         analysis_data.append(item)
 
@@ -84,12 +77,9 @@ async def process_excel(file: UploadFile = File(...)):
     cat_benchmarks = {}
     for cat in df['category'].unique():
         cat_df = df[df['category'] == cat]
-        total_rev = cat_df['value_sales'].sum()
-        total_cost = (cat_df['unit_sales'] * cat_df['net_price']).sum()
-        
-        if total_rev > 0:
-            avg_margin = ((total_rev - total_cost) / total_rev) * 100
-            cat_benchmarks[str(cat)] = round(float(avg_margin), 2)
+        rev = cat_df['value_sales'].sum()
+        cost = (cat_df['unit_sales'] * cat_df['net_price']).sum()
+        cat_benchmarks[str(cat)] = round(((rev - cost) / rev) * 100, 2) if rev > 0 else 0
 
     return {
         "products": analysis_data,
